@@ -1,205 +1,102 @@
-const db = require('./db');
-const { extractContent } = require('./extractor');
-const { summarizeText } = require('./llm-client');
-const { sendEmail } = require('./notifier');
-require('dotenv').config();
-
-/**
- * Check if a workflow is due based on frequency and last_run
- * @param {object} workflow - Workflow object from DB
- * @returns {boolean}
- */
-function shouldRunNow(workflow) {
-  const { frequency, last_run } = workflow;
-  const now = new Date();
-  const lastRun = last_run ? new Date(last_run) : new Date(0);
-  const diffMs = now - lastRun;
-
-  const frequencyMs = {
-    '15min': 15 * 60 * 1000,
-    'hourly': 60 * 60 * 1000,
-    'daily': 24 * 60 * 60 * 1000,
-  };
-
-  const threshold = frequencyMs[frequency] || 24 * 60 * 60 * 1000;
-  return diffMs >= threshold;
-}
-
-/**
- * Execute a single workflow: extract → summarize → notify
- * @param {object} workflow - Workflow object
- * @returns {Promise<object>} - Result object
- */
-async function runWorkflowRow(workflow) {
-  const { id: workflowId, url, prompt, notify_type, email, user_id } = workflow;
-
-  const result = {
-    workflowId,
-    success: false,
-    summary: null,
-    metadata: {},
-    error: null,
-  };
-
-  try {
-    // Step 1: Extract content
-    console.log(`[Workflow ${workflowId}] Extracting from ${url}`);
-    const extraction = await extractContent(url);
-
-    if (!extraction.success) {
-      throw new Error(`Extraction failed: ${extraction.error}`);
-    }
-
-    result.metadata.method = extraction.method;
-    result.metadata.title = extraction.title;
-    result.metadata.extractedLength = extraction.text.length;
-
-    // Step 2: Summarize (use LLM if available; fall back to simple extractor summary)
-    console.log(`[Workflow ${workflowId}] Summarizing...`);
-    let summary;
-    try {
-      summary = await summarizeText(extraction.text, prompt);
-    } catch (llmErr) {
-      console.warn(`[Workflow ${workflowId}] LLM summarization failed: ${llmErr.message}. Falling back to local summary.`);
-      // Simple fallback: take first two sentences or first 500 chars
-      const text = extraction.text || '';
-      const sentences = text.match(/[^.!?]+[.!?]+/g) || [];
-      if (sentences.length >= 2) {
-        summary = (sentences.slice(0, 2).join(' ')).trim();
-      } else {
-        summary = text.substring(0, 500).trim();
-      }
-    }
-    result.summary = summary;
-
-    // Step 3: Store result in database
-    console.log(`[Workflow ${workflowId}] Storing result...`);
-    await db.createWorkflowResult({
-      workflow_id: workflowId,
-      summary,
-      metadata: result.metadata,
-      timestamp: new Date().toISOString(),
-      seen: notify_type === 'email', // Auto-seen for email
-    });
-
-    // Step 4: Send notification
-    if (notify_type === 'email' && email) {
-      console.log(`[Workflow ${workflowId}] Sending email to ${email}`);
-      await sendEmail({
-        to: email,
-        subject: `Aera: ${result.metadata.title || 'Workflow Summary'}`,
-        summary,
-        title: result.metadata.title,
-      });
-    } else if (notify_type === 'in-app') {
-      console.log(`[Workflow ${workflowId}] In-app notification saved`);
-    }
-
-    // Step 5: Update workflow
-    console.log(`[Workflow ${workflowId}] Updating workflow...`);
-    await db.updateWorkflow(workflowId, {
-      last_run: new Date().toISOString(),
-      status: 'active',
-    });
-
-    result.success = true;
-    console.log(`[Workflow ${workflowId}] ✓ Complete`);
-  } catch (err) {
-    result.error = err.message;
-    console.error(`[Workflow ${workflowId}] ✗ Error: ${err.message}`);
-
-    // Mark workflow as error
-    try {
-      await db.updateWorkflow(workflowId, {
-        status: 'error',
-        last_run: new Date().toISOString(),
-      });
-    } catch (updateErr) {
-      console.error(`Failed to update workflow status: ${updateErr.message}`);
-    }
-
-    // Store error result
-    try {
-      await db.createWorkflowResult({
-        workflow_id: workflowId,
-        summary: `Error: ${err.message}`,
-        metadata: { error: err.message },
-        timestamp: new Date().toISOString(),
-        seen: false,
-      });
-    } catch (resultErr) {
-      console.error(`Failed to store error result: ${resultErr.message}`);
-    }
+// Determine API base automatically: prefer env var, fallback to localhost:3000
+const API_BASE = (() => {
+  // 1. Check explicit env var
+  if (import.meta.env.VITE_API_BASE) {
+    console.log('[Workflows API] Using VITE_API_BASE:', import.meta.env.VITE_API_BASE);
+    return import.meta.env.VITE_API_BASE;
   }
 
-  return result;
-}
-
-/**
- * CORE BUSINESS LOGIC - Process all due workflows
- * This function is framework-agnostic and reusable for both Render Cron and Cloudflare Workers
- * @returns {Promise<object>} - { timestamp, totalWorkflows, processedWorkflows, successfulWorkflows, failedWorkflows, results }
- */
-async function processWorkflows() {
-  console.log('\n========== WORKFLOW PROCESSING STARTED ==========');
-  console.log(`Time: ${new Date().toISOString()}`);
-
-  const summary = {
-    timestamp: new Date().toISOString(),
-    totalWorkflows: 0,
-    processedWorkflows: 0,
-    successfulWorkflows: 0,
-    failedWorkflows: 0,
-    results: [],
-  };
-
+  // 2. Check if running in Electron (file:// protocol) or Vite dev (localhost:5173)
   try {
-    // Fetch all active workflows
-    const workflows = await db.getAllActiveWorkflows();
-    summary.totalWorkflows = workflows.length;
+    const loc = window.location;
+    // Electron app: file:// or Vite dev server: http://localhost:5173
+    const isElectron = loc.protocol === 'file:';
+    const isViteDev = loc.port === '5173' || loc.hostname === 'localhost';
 
-    if (workflows.length === 0) {
-      console.log('No active workflows');
-      console.log('========== WORKFLOW PROCESSING ENDED ==========\n');
-      return summary;
+    if (isElectron || isViteDev) {
+      const base = `http://localhost:3000`;
+      console.log(`[Workflows API] Detected ${isElectron ? 'Electron' : 'Vite dev'}, using ${base}`);
+      return base;
     }
 
-    console.log(`Found ${workflows.length} active workflows`);
-
-    // Process each workflow due for execution
-    for (const workflow of workflows) {
-      if (shouldRunNow(workflow)) {
-        console.log(`\n➜ Processing: ${workflow.id}`);
-        const result = await runWorkflowRow(workflow);
-        summary.results.push(result);
-        summary.processedWorkflows++;
-
-        if (result.success) {
-          summary.successfulWorkflows++;
-        } else {
-          summary.failedWorkflows++;
-        }
-      } else {
-        console.log(`⊘ ${workflow.id} not due yet (${workflow.frequency})`);
-      }
-    }
-
-    console.log('\n========== SUMMARY ==========');
-    console.log(`Total: ${summary.totalWorkflows}`);
-    console.log(`Processed: ${summary.processedWorkflows}`);
-    console.log(`✓ Success: ${summary.successfulWorkflows}`);
-    console.log(`✗ Failed: ${summary.failedWorkflows}`);
-    console.log('========== WORKFLOW PROCESSING ENDED ==========\n');
-  } catch (err) {
-    console.error('Fatal error:', err.message);
-    summary.error = err.message;
+    // 3. Same-origin API (production)
+    console.log('[Workflows API] Using same-origin API');
+    return '';
+  } catch (e) {
+    console.warn('[Workflows API] Failed to detect environment:', e.message);
+    return '';
   }
+})();
 
-  return summary;
+console.log('[Workflows API] Initialized with base:', API_BASE || '(same origin)');
+
+async function request(path, opts) {
+  const url = (API_BASE || '') + path;
+  console.log(`[Workflows API] Fetching: ${url}`);
+  
+  try {
+    const res = await fetch(url, opts);
+    const ct = res.headers.get('content-type') || '';
+    const text = await res.text();
+
+    if (!res.ok) {
+      // If server returned HTML (e.g. index.html) expose it for debugging
+      const body = ct.includes('application/json') ? JSON.parse(text) : text;
+      throw new Error(`${res.status}: ${typeof body === 'string' ? body : JSON.stringify(body)}`);
+    }
+
+    if (ct.includes('application/json')) {
+      return JSON.parse(text);
+    }
+
+    // If response isn't JSON, try to parse, otherwise return raw text
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      return text;
+    }
+  } catch (err) {
+    console.error(`[Workflows API] Fetch failed for ${url}:`, err.message);
+    throw err;
+  }
 }
 
-module.exports = {
-  shouldRunNow,
-  runWorkflowRow,
-  processWorkflows,
-};
+export async function getWorkflows(userId) {
+  try {
+    return await request(`/workflows?user_id=${encodeURIComponent(userId)}`);
+  } catch (err) {
+    console.error('getWorkflows error:', err.message);
+    throw err;
+  }
+}
+
+export async function createWorkflow(payload) {
+  try {
+    return await request('/workflows', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } catch (err) {
+    console.error('createWorkflow error:', err.message);
+    throw err;
+  }
+}
+
+export async function deleteWorkflow(id) {
+  try {
+    return await request(`/workflows/${id}`, { method: 'DELETE' });
+  } catch (err) {
+    console.error('deleteWorkflow error:', err.message);
+    throw err;
+  }
+}
+
+export async function getWorkflowResults(workflowId) {
+  try {
+    return await request(`/workflow-results?workflow_id=${encodeURIComponent(workflowId)}`);
+  } catch (err) {
+    console.error('getWorkflowResults error:', err.message);
+    throw err;
+  }
+}
