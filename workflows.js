@@ -1,80 +1,137 @@
+const db = require('./db');
+const { extractContent } = require('./extractor');
+const { summarizeText } = require('./llm-client');
+const { sendEmail } = require('./notifier');
+
 /**
- * BACKEND-ONLY WORKFLOWS CLIENT
- * Safe for Node.js (CommonJS). No import.meta, no window.
+ * Check if workflow is due to run
  */
+function shouldRunNow(workflow) {
+  const { frequency, last_run } = workflow;
+  const now = new Date();
+  const lastRun = last_run ? new Date(last_run) : new Date(0);
 
-require('dotenv').config();
-const fetch = require('node-fetch');
+  const diff = now - lastRun;
 
-// Determine API BASE for backend → only from environment
-const API_BASE =
-  process.env.API_BASE ||
-  process.env.VITE_API_BASE ||        // optional, if you set it manually
-  "http://localhost:3000";            // fallback for local dev
+  const ms = {
+    "15min": 15 * 60 * 1000,
+    "hourly": 60 * 60 * 1000,
+    "daily": 24 * 60 * 60 * 1000
+  };
 
-console.log("[Backend Workflows] API_BASE =", API_BASE);
+  return diff >= (ms[frequency] || ms["daily"]);
+}
 
-// Unified request wrapper
-async function request(path, opts = {}) {
-  const url = API_BASE + path;
-  console.log(`[Backend Workflows] Fetching: ${url}`);
+/**
+ * Run a single workflow row
+ */
+async function runWorkflowRow(workflow) {
+  const { id, url, prompt, notify_type, email } = workflow;
+
+  const result = {
+    workflowId: id,
+    success: false,
+    summary: null,
+    metadata: {},
+    error: null
+  };
 
   try {
-    const res = await fetch(url, opts);
-    const text = await res.text();
-    const ct = res.headers.get("content-type") || "";
+    console.log(`[Workflow ${id}] Extracting from ${url}`);
+    const extraction = await extractContent(url);
 
-    if (!res.ok) {
-      let body = text;
-      if (ct.includes("application/json")) {
-        try {
-          body = JSON.parse(text);
-        } catch (_) {}
-      }
-      throw new Error(`${res.status}: ${typeof body === "string" ? body : JSON.stringify(body)}`);
+    if (!extraction.success) {
+      throw new Error(`Extraction failed: ${extraction.error}`);
     }
 
-    if (ct.includes("application/json")) {
-      return JSON.parse(text);
-    }
+    result.metadata = {
+      method: extraction.method,
+      title: extraction.title,
+      extractedLength: extraction.text.length
+    };
 
+    console.log(`[Workflow ${id}] Summarizing...`);
+    let summary;
     try {
-      return JSON.parse(text);
-    } catch {
-      return text;
+      summary = await summarizeText(extraction.text, prompt);
+    } catch (e) {
+      console.warn(`[Workflow ${id}] LLM failed, falling back: ${e.message}`);
+      summary = extraction.text.slice(0, 500);
     }
+
+    result.summary = summary;
+
+    console.log(`[Workflow ${id}] Saving result...`);
+    await db.createWorkflowResult({
+      workflow_id: id,
+      summary,
+      metadata: result.metadata,
+      timestamp: new Date().toISOString(),
+      seen: notify_type === "email"
+    });
+
+    if (notify_type === "email" && email) {
+      console.log(`[Workflow ${id}] Sending email to ${email}`);
+      await sendEmail({
+        to: email,
+        subject: `Aera Workflow Summary`,
+        summary,
+        title: result.metadata.title
+      });
+    }
+
+    await db.updateWorkflow(id, {
+      last_run: new Date().toISOString(),
+      status: "active"
+    });
+
+    result.success = true;
+    return result;
+
   } catch (err) {
-    console.error(`[Backend Workflows] Fetch failed for ${url}:`, err.message);
-    throw err;
+    result.error = err.message;
+    console.error(`[Workflow ${id}] Error: ${err.message}`);
+
+    await db.updateWorkflow(id, {
+      status: "error",
+      last_run: new Date().toISOString()
+    });
+
+    return result;
   }
 }
 
-// API functions (Node-safe)
-async function getWorkflows(userId) {
-  return await request(`/workflows?user_id=${encodeURIComponent(userId)}`);
+/**
+ * Process all workflows due to run
+ */
+async function processWorkflows() {
+  console.log("=== PROCESSING WORKFLOWS ===");
+
+  const workflows = await db.getAllActiveWorkflows();
+  const summary = {
+    total: workflows.length,
+    processed: 0,
+    success: 0,
+    failed: 0,
+    results: []
+  };
+
+  for (const workflow of workflows) {
+    if (shouldRunNow(workflow)) {
+      const result = await runWorkflowRow(workflow);
+      summary.results.push(result);
+      summary.processed++;
+
+      if (result.success) summary.success++;
+      else summary.failed++;
+    }
+  }
+
+  return summary;
 }
 
-async function createWorkflow(payload) {
-  return await request('/workflows', {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  });
-}
-
-async function deleteWorkflow(id) {
-  return await request(`/workflows/${id}`, { method: "DELETE" });
-}
-
-async function getWorkflowResults(workflowId) {
-  return await request(`/workflow-results?workflow_id=${encodeURIComponent(workflowId)}`);
-}
-
-// Export for Node backend
 module.exports = {
-  API_BASE,
-  getWorkflows,
-  createWorkflow,
-  deleteWorkflow,
-  getWorkflowResults
+  shouldRunNow,
+  runWorkflowRow,
+  processWorkflows
 };
