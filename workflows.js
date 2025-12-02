@@ -108,6 +108,8 @@ async function processWorkflows() {
   console.log("=== PROCESSING WORKFLOWS ===");
 
   const workflows = await db.getAllActiveWorkflows();
+  console.log(`📊 Found ${workflows.length} active workflows`);
+  
   const summary = {
     total: workflows.length,
     processed: 0,
@@ -117,7 +119,11 @@ async function processWorkflows() {
   };
 
   for (const workflow of workflows) {
-    if (shouldRunNow(workflow)) {
+    const isDue = shouldRunNow(workflow);
+    console.log(`[Workflow ${workflow.id}] Due: ${isDue}, Last run: ${workflow.last_run || 'never'}`);
+    
+    if (isDue) {
+      console.log(`▶️  Running workflow ${workflow.id}...`);
       const result = await runWorkflowRow(workflow);
       summary.results.push(result);
       summary.processed++;
