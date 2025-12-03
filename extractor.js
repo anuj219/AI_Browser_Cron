@@ -5,6 +5,7 @@
 
 const { JSDOM } = require("jsdom");
 const fetch = require("node-fetch");
+const { extractWithCloudflare } = require("./cloudflare");
 
 /**
  * Extract text using Mozilla Readability.
@@ -37,14 +38,14 @@ function extractUsingBasicParser(html, url) {
   try {
     const dom = new JSDOM(html, { url });
     const doc = dom.window.document;
-    
+
     // Remove script and style tags
     Array.from(doc.querySelectorAll('script, style, nav, footer')).forEach(el => el.remove());
-    
+
     // Get main content (prioritize main, article, or just body)
     const main = doc.querySelector('main') || doc.querySelector('article') || doc.querySelector('body');
     const text = main?.textContent || '';
-    
+
     // Clean up whitespace
     const cleaned = text
       .split('\n')
@@ -52,11 +53,11 @@ function extractUsingBasicParser(html, url) {
       .filter(line => line.length > 0)
       .slice(0, 500) // Limit to first 500 lines
       .join('\n');
-    
+
     if (cleaned.length < 100) {
       return { success: false, error: "Insufficient content (Basic parser)" };
     }
-    
+
     return {
       success: true,
       method: "basic-parser",
@@ -80,12 +81,23 @@ async function extractContent(url) {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
       }
     });
-    
+
     if (!res.ok) {
       return { success: false, error: `HTTP ${res.status}` };
     }
-    
+
     const body = await res.text();
+
+
+    try {
+      // TRY CLOUDFLARE FIRST (works on dynamic pages like BBC)
+      console.log(`[Extractor] Attempting Cloudflare...`);
+      const cf = await extractWithCloudflare(url);
+      if (cf && cf.length > 200) {
+        return { success: true, method: "cloudflare", text: cf, title: null };
+      }
+    } catch (_) { }
+
 
     // Try Readability first
     console.log(`[Extractor] Attempting Readability...`);
@@ -95,7 +107,7 @@ async function extractContent(url) {
       return readable;
     }
 
-    console.log(`[Extractor] Readability failed, trying basic parser...`);
+    // console.log(`[Extractor] Readability failed, trying basic parser...`);
     const basic = extractUsingBasicParser(body, url);
     if (basic.success) {
       console.log(`[Extractor] ✓ Success with basic parser (${basic.text.length} chars)`);
@@ -110,5 +122,7 @@ async function extractContent(url) {
     return { success: false, error: err.message };
   }
 }
+
+
 
 module.exports = { extractContent };

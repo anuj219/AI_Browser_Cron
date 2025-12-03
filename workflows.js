@@ -19,7 +19,19 @@ function shouldRunNow(workflow) {
     "daily": 24 * 60 * 60 * 1000
   };
 
+  console.log(`${workflow.id} : `+diff);
   return diff >= (ms[frequency] || ms["daily"]);
+}
+
+function cleanTextForLLM(raw) {
+  return raw
+    // remove "123 points by … hours ago | hide | 456 comments"
+    .replace(/\d+\s+points?\s+by\s+[^\|]+?\|\s*\d+\s+comments?/gi, '')
+    // remove "hide | discuss | past"
+    .replace(/\b(hide|discuss|past|jobs|submit)\b/gi, '')
+    // collapse whitespace
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /**
@@ -53,7 +65,8 @@ async function runWorkflowRow(workflow) {
     console.log(`[Workflow ${id}] Summarizing...`);
     let summary;
     try {
-      summary = await summarizeText(extraction.text, prompt);
+      const text = cleanTextForLLM(extraction.text);
+      summary = await summarizeText(text, prompt);
     } catch (e) {
       console.warn(`[Workflow ${id}] LLM failed, falling back: ${e.message}`);
       summary = extraction.text.slice(0, 500);
@@ -123,7 +136,7 @@ async function processWorkflows() {
     console.log(`[Workflow ${workflow.id}] Due: ${isDue}, Last run: ${workflow.last_run || 'never'}`);
     
     if (isDue) {
-      console.log(`▶️  Running workflow ${workflow.id}...`);
+      console.log(`\n\n----------------------- \n ▶️  Running workflow ${workflow.id}...`);
       const result = await runWorkflowRow(workflow);
       summary.results.push(result);
       summary.processed++;

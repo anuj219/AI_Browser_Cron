@@ -1,160 +1,226 @@
-const fetch = require('node-fetch');
-require('dotenv').config();
+const fetch = require("node-fetch");
+require("dotenv").config();
 
-const LLM_API_URL = process.env.LLM_API_URL || 'https://api.openai.com/v1/chat/completions';
+const LLM_API_URL = process.env.LLM_API_URL;   // For Gemini → leave empty
 const LLM_API_KEY = process.env.LLM_API_KEY;
-const LLM_MODEL = process.env.LLM_MODEL || 'gpt-3.5-turbo';
+const LLM_MODEL = process.env.LLM_MODEL || "gemini-1.5-flash"; // or gemini-1.5-pro
+
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_API_URL = process.env.OPENAI_API_URL || 'https://api.openai.com/v1/chat/completions';
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-3.5-turbo';
 
 /**
- * Detect if using Google Gemini or OpenAI-like API
+ * Detect if using Google Gemini
  */
 function isGoogleGemini() {
-  return LLM_API_URL.includes('generativelanguage.googleapis.com');
+  return true; // You ONLY use Gemini, so simplify detection
 }
 
 /**
- * Call Google Gemini API
+ * UNIVERSAL RESPONSE PARSER for all Gemini API formats
+ */
+function extractGeminiText(data) {
+  // Newest format: output_text
+  if (typeof data.output_text === "string" && data.output_text.trim()) {
+    return data.output_text.trim();
+  }
+
+  // Standard Gemini response (candidates[].content.parts[].text)
+  if (Array.isArray(data.candidates)) {
+    const c = data.candidates[0];
+
+    // Standard parts
+    if (c?.content?.parts?.length) {
+      const txt = c.content.parts
+        .map((p) => p.text || "")
+        .join("\n")
+        .trim();
+
+      if (txt) return txt;
+    }
+
+    // Some responses use a "text" field inside candidates
+    if (typeof c?.text === "string" && c.text.trim()) {
+      return c.text.trim();
+    }
+  }
+
+  // Rare old format: .text field on root
+  if (typeof data.text === "string" && data.text.trim()) {
+    return data.text.trim();
+  }
+
+  return "";
+}
+
+/**
+ * Call Google Gemini API with modern universal format
  */
 async function callGeminiAPI(text, userPrompt) {
   const url = `https://generativelanguage.googleapis.com/v1/models/${LLM_MODEL}:generateContent?key=${LLM_API_KEY}`;
-  
+
   const requestBody = {
     contents: [
       {
-        role: 'user',
+        role: "user",
         parts: [
           {
-            text: `${userPrompt}\n\nContent:\n${text.substring(0, 4000)}`
+            text: `${userPrompt}\n\n${text.substring(0, 4000)}`
           }
         ]
       }
     ],
     generationConfig: {
-      maxOutputTokens: 500,
-      temperature: 0.7
+      maxOutputTokens: 600,
+      temperature: 0.7,
     }
   };
 
+  // Diagnostics: log a trimmed snapshot of the request payload (avoid sensitive data)
+  try {
+    const payloadSnapshot = JSON.stringify(requestBody).substring(0, 2000);
+    console.log('[LLM] Gemini request snapshot (trimmed):', payloadSnapshot);
+    console.log('[LLM] Gemini request headers:', { 'Content-Type': 'application/json' });
+    // Log url without key for safety
+    const safeUrl = url.replace(/([?&])key=[^&]+/, '$1key=REDACTED');
+    console.log('[LLM] Gemini endpoint (safe):', safeUrl);
+  } catch (e) {
+    console.error('[LLM] Failed to build request snapshot for diagnostics');
+  }
+
   const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(requestBody),
-    timeout: 30000
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Gemini API error ${response.status}: ${errorText.substring(0, 500)}`);
-  }
-
-  const data = await response.json();
-  
-  // Extract text from Gemini response
-  if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
-    return data.candidates[0].content.parts[0].text.trim();
-  }
-  
-  throw new Error('Unexpected Gemini response format');
-}
-
-/**
- * Call OpenAI-like API
- */
-async function callOpenAIAPI(text, userPrompt) {
-  const messages = [
-    {
-      role: 'system',
-      content: 'You are a helpful assistant that creates concise, accurate summaries.',
-    },
-    {
-      role: 'user',
-      content: `${userPrompt}\n\nContent:\n${text.substring(0, 4000)}`,
-    },
-  ];
-
-  const requestBody = {
-    model: LLM_MODEL,
-    messages,
-    max_tokens: 500,
-    temperature: 0.7,
-  };
-
-  const response = await fetch(LLM_API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${LLM_API_KEY}`,
-    },
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(requestBody),
     timeout: 30000,
   });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    const isHtml = /<(!doctype|html)/i.test(errorText);
-    const shortMsg = isHtml
-      ? `LLM API returned non-JSON HTML (status ${response.status})`
-      : errorText.substring(0, 500);
-    throw new Error(`LLM API error ${response.status}: ${shortMsg}`);
-  }
-
-  // Try parsing JSON safely
+  const raw = await response.text();
   let data;
+
+  // Safe JSON parse
   try {
-    data = await response.json();
-  } catch (parseErr) {
-    const txt = await response.text();
-    const isHtml = /<(!doctype|html)/i.test(txt);
-    const shortMsg = isHtml ? `LLM API returned non-JSON HTML (status ${response.status})` : txt.substring(0, 500);
-    throw new Error(`LLM API parse error: ${shortMsg}`);
+    data = JSON.parse(raw);
+  } catch (e) {
+    // Include a small raw snapshot for diagnostics
+    throw new Error(`Gemini returned non-JSON response: ${raw.substring(0, 300)}`);
   }
 
-  // Parse response (supports different formats)
-  let summary;
-  if (data.choices?.[0]?.message?.content) {
-    summary = data.choices[0].message.content;
-  } else if (data.result) {
-    summary = data.result;
-  } else {
-    throw new Error('Unexpected LLM response format');
+  if (!response.ok) {
+    // Provide trimmed raw body for error diagnostics
+    throw new Error(`Gemini API error ${response.status}: ${raw.substring(0, 500)}`);
   }
 
-  return summary.trim();
+  const summary = extractGeminiText(data);
+  if (!summary) {
+    // Log a trimmed snapshot of the raw response for debugging (avoid dumping huge payloads)
+    try {
+      const snapshot = JSON.stringify(data, Object.keys(data).slice(0, 20), 2).substring(0, 1500);
+      console.error('[LLM] Gemini raw response snapshot:', snapshot);
+    } catch (e) {
+      console.error('[LLM] Failed to stringify Gemini response for diagnostics');
+    }
+
+    throw new Error("Gemini returned empty or unrecognized format");
+  }
+
+  return summary;
 }
 
 /**
- * Summarize text using LLM API (Google Gemini or OpenAI-like)
- * @param {string} text - Text to summarize
- * @param {string} userPrompt - User's summarization prompt
- * @returns {Promise<string>} - Summarized text
+ * OpenAI-like API (unused, but kept for fallback)
  */
-async function summarizeText(text, userPrompt = 'Provide a concise summary') {
-  if (!LLM_API_KEY) {
-    throw new Error('LLM_API_KEY not configured');
-  }
+async function callOpenAIAPI(text, userPrompt) {
+  if (!OPENAI_API_KEY) throw new Error('OPENAI_API_KEY not configured');
 
-  if (!text || text.trim().length === 0) {
-    throw new Error('Empty text provided for summarization');
-  }
+  const messages = [
+    { role: 'system', content: 'You are a helpful assistant that creates concise, accurate summaries.' },
+    { role: 'user', content: `${userPrompt}\n\nContent:\n${text.substring(0, 4000)}` }
+  ];
 
+  const body = {
+    model: OPENAI_MODEL,
+    messages,
+    max_tokens: 500,
+    temperature: 0.7
+  };
+
+  // Diagnostics
   try {
-    let summary;
-    
-    if (isGoogleGemini()) {
-      console.log(`[LLM] Using Google Gemini API...`);
-      summary = await callGeminiAPI(text, userPrompt);
-    } else {
-      console.log(`[LLM] Using OpenAI-like API...`);
-      summary = await callOpenAIAPI(text, userPrompt);
-    }
+    console.log('[LLM] OpenAI request snapshot (trimmed):', JSON.stringify(body).substring(0, 1000));
+    console.log('[LLM] OpenAI endpoint (safe):', OPENAI_API_URL);
+  } catch (e) {}
 
-    return summary;
-  } catch (err) {
-    console.error('LLM summarization error:', err.message);
-    throw err;
+  const res = await fetch(OPENAI_API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${OPENAI_API_KEY}`
+    },
+    body: JSON.stringify(body),
+    timeout: 30000
+  });
+
+  const txt = await res.text();
+  let data;
+  try { data = JSON.parse(txt); } catch (e) { throw new Error(`OpenAI returned non-JSON response: ${txt.substring(0,300)}`); }
+
+  if (!res.ok) {
+    throw new Error(`OpenAI API error ${res.status}: ${txt.substring(0,500)}`);
   }
+
+  const content = data.choices?.[0]?.message?.content || data.choices?.[0]?.text;
+  if (typeof content === 'string' && content.trim()) return content.trim();
+
+  throw new Error('OpenAI returned empty or unrecognized format');
+}
+
+/**
+ * MAIN summarizer entry
+ */
+async function summarizeText(rawText, userPrompt = "Provide a concise summary") {
+  if (!LLM_API_KEY && !OPENAI_API_KEY) throw new Error("No LLM API key configured (LLM_API_KEY or OPENAI_API_KEY required)");
+  if (!rawText || !rawText.trim()) throw new Error("Empty text to summarize");
+
+  const cleaned = rawText.replace(/\s+/g, " ").trim();
+
+  // 1) Try Gemini if key present
+  if (LLM_API_KEY) {
+    try {
+      console.log("[LLM] Using Google Gemini API...");
+      return await callGeminiAPI(cleaned, userPrompt);
+    } catch (err) {
+      console.error("LLM summarization error (Gemini):", err.message);
+
+      // small-input fallback for Gemini
+      if (/empty or unrecognized format|returned non-JSON response/i.test(err.message)) {
+        try {
+          const small = cleaned.substring(0, 800);
+          console.log('[LLM] Attempting Gemini small-input fallback (800 chars)');
+          const smallSummary = await callGeminiAPI(small, `${userPrompt} (short-input fallback)`);
+          console.log('[LLM] Gemini small-input fallback succeeded');
+          return smallSummary;
+        } catch (err2) {
+          console.error('[LLM] Gemini small-input fallback failed:', err2.message);
+        }
+      }
+      // If Gemini fails entirely, fall through to OpenAI (if available)
+    }
+  }
+
+  // 2) Try OpenAI fallback if configured
+  if (OPENAI_API_KEY) {
+    try {
+      console.log('[LLM] Falling back to OpenAI API...');
+      return await callOpenAIAPI(cleaned, userPrompt);
+    } catch (err) {
+      console.error('[LLM] OpenAI fallback failed:', err.message);
+      throw err;
+    }
+  }
+
+  // 3) No provider succeeded
+  throw new Error('All LLM providers failed to produce a summary');
 }
 
 module.exports = {
