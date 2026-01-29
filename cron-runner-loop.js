@@ -1,5 +1,5 @@
-const { processWorkflows } = require('./workflows');
 require('dotenv').config();
+const { processWorkflows } = require('./workflows');
 
 async function loop() {
   while (true) {

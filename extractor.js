@@ -79,8 +79,11 @@ async function extractContent(url) {
   console.log(`[Extractor] Fetching: ${url}`);
 
   // --------------------------
-  // 1. TRY CLOUDFLARE FIRST
+  // 1. TRY CLOUDFLARE FIRST (DISABLED - endpoint returns 404)
   // --------------------------
+  // Cloudflare Browser Rendering endpoint is not available or not configured correctly.
+  // Uncomment below to re-enable if you have the correct endpoint setup.
+  /*
   try {
     console.log("[Extractor] Attempting Cloudflare...");
 
@@ -96,6 +99,7 @@ async function extractContent(url) {
   } catch (err) {
     console.warn(`[Extractor] Cloudflare error: ${err.message}`);
   }
+  */
 
   // --------------------------
   // 2. FETCH RAW HTML

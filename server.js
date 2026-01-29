@@ -6,7 +6,7 @@ require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
+  
 // Middleware - CORS must be first and very permissive for preflight requests
 app.use(cors({
   origin: '*', // Allow all origins for development

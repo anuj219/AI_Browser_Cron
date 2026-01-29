@@ -1,0 +1,13 @@
+Every 15 minutes:
+
+Fresh Ubuntu VM starts
+
+Repo is cloned
+
+Node 20 installed
+
+npm install
+
+node cron-runner.js
+
+VM dies
