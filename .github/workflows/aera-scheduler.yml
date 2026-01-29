@@ -8,6 +8,8 @@ on:
 jobs:
   run-cron:
     runs-on: ubuntu-latest
+    environment: Aera_Workflows
+
 
     steps:
       - name: Checkout repo
@@ -24,6 +26,6 @@ jobs:
 
       - name: Run workflow scheduler
         run: node cron-runner.js
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        # env:
+        #   SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        #   SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
