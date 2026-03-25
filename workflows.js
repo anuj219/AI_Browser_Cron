@@ -19,7 +19,7 @@ function shouldRunNow(workflow) {
     "daily": 24 * 60 * 60 * 1000
   };
 
-  console.log(`${workflow.id} : `+diff);
+  console.log(`${workflow.id} : ` + diff);
   return diff >= (ms[frequency] || ms["daily"]);
 }
 
@@ -38,23 +38,18 @@ function cleanTextForLLM(raw) {
  * Run a single workflow row
  */
 async function runWorkflowRow(workflow) {
-  const { id, url, prompt, notify_type, email } = workflow;
+  const { id, url, prompt, notify_type, email, type } = workflow;
 
   const result = {
-    workflowId: id,
-    success: false,
-    summary: null,
-    metadata: {},
-    error: null
+    workflowId: id, success: false, summary: null, metadata: {}, error: null
   };
 
   try {
-    console.log(`[Workflow ${id}] Extracting from ${url}`);
-    const extraction = await extractContent(url);
+    // 1. EXTRACTION
+    console.log(`\n[Workflow ${id}] Strategy: ${type || 'general'} | URL: ${url}`);
+    const extraction = await extractContent(url, prompt);
 
-    if (!extraction.success) {
-      throw new Error(`Extraction failed: ${extraction.error}`);
-    }
+    if (!extraction.success) throw new Error(extraction.error);
 
     result.metadata = {
       method: extraction.method,
@@ -62,37 +57,65 @@ async function runWorkflowRow(workflow) {
       extractedLength: extraction.text.length
     };
 
-    console.log(`[Workflow ${id}] Summarizing...`);
-    let summary;
-    try {
-      const text = cleanTextForLLM(extraction.text);
-      summary = await summarizeText(text, prompt);
-    } catch (e) {
-      console.warn(`[Workflow ${id}] LLM failed, falling back: ${e.message}`);
-      summary = extraction.text.slice(0, 500);
-    }
+    // 2. LLM EXECUTION (The Corrected Persona + Sandwich Prompt)
+    console.log(`[Workflow ${id}] Executing Agent...`);
 
-    result.summary = summary;
+    const personas = {
+      news_headlines: "You are a professional News Editor. Extract 5 clear headlines.",
+      price_tracker: "You are a Financial Data Analyst. Find the exact price or numerical value.",
+      summary: "You are a Research Assistant. Provide a concise executive summary.",
+      general: "You are an AI Browser Agent."
+    };
 
+    const systemPersona = personas[type] || personas.general;
+
+    const enhancedPrompt = `
+      STRICT COMMAND: ${systemPersona} 
+      TASK: "${prompt}"
+      
+      CONTEXT (WEBPAGE CONTENT):
+      ---
+      ${extraction.text}
+      ---
+
+      RULES FOR OUTPUT:
+      1. If the task specifies a count (e.g. 5 items), return EXACTLY that many.
+      2. If a language is specified (Hindi/Gujarati), the entire response MUST be in that language.
+      3. CLEANUP: No conversational filler. No "Here is your summary". Just the data.
+      4. WHITESPACE: Do not leave large gaps or weird character spacing.
+      
+      FINAL CONFIRMATION: Perform the task "${prompt}" now.
+    `;
+
+    const rawSummary = await summarizeText(extraction.text, enhancedPrompt);
+
+    // SANITIZER: This kills the "Hindi Gap" bug
+    result.summary = rawSummary
+      .replace(/[^\S\r\n]{2,}/g, ' ') // Collapses multiple spaces but keeps newlines
+      .replace(/\n{3,}/g, '\n\n')    // Prevents massive vertical voids
+      .trim();
+
+    // 3. PERSISTENCE
     console.log(`[Workflow ${id}] Saving result...`);
     await db.createWorkflowResult({
       workflow_id: id,
-      summary,
+      summary: result.summary,
       metadata: result.metadata,
       timestamp: new Date().toISOString(),
       seen: notify_type === "email"
     });
 
+    // 4. NOTIFICATION (Optional)
     if (notify_type === "email" && email) {
-      console.log(`[Workflow ${id}] Sending email to ${email}`);
       await sendEmail({
         to: email,
-        subject: `Aera Workflow Summary`,
-        summary,
+        subject: `Aera Workflow: ${result.metadata.title}`,
+        summary: result.summary,
         title: result.metadata.title
       });
     }
 
+    // 5. UPDATE STATE
     await db.updateWorkflow(id, {
       last_run: new Date().toISOString(),
       status: "active"
@@ -104,15 +127,11 @@ async function runWorkflowRow(workflow) {
   } catch (err) {
     result.error = err.message;
     console.error(`[Workflow ${id}] Error: ${err.message}`);
-
-    await db.updateWorkflow(id, {
-      status: "error",
-      last_run: new Date().toISOString()
-    });
-
+    await db.updateWorkflow(id, { status: "error", last_run: new Date().toISOString() });
     return result;
   }
 }
+
 
 /**
  * Process all workflows due to run
@@ -122,7 +141,7 @@ async function processWorkflows() {
 
   const workflows = await db.getAllActiveWorkflows();
   console.log(`📊 Found ${workflows.length} active workflows`);
-  
+
   const summary = {
     total: workflows.length,
     processed: 0,
@@ -134,7 +153,7 @@ async function processWorkflows() {
   for (const workflow of workflows) {
     const isDue = shouldRunNow(workflow);
     console.log(`[Workflow ${workflow.id}] Due: ${isDue}, Last run: ${workflow.last_run || 'never'}`);
-    
+
     if (isDue) {
       console.log(`\n\n----------------------- \n ▶️  Running workflow ${workflow.id}...`);
       const result = await runWorkflowRow(workflow);

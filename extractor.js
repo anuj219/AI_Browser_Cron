@@ -1,152 +1,88 @@
-/**
- * Simple extraction using Cloudflare Browser Rendering + Readability fallback
- */
+const { chromium } = require('playwright');
+const TurndownService = require('turndown');
+const { Readability } = require('@mozilla/readability');
+const { JSDOM } = require('jsdom');
 
-const { JSDOM } = require("jsdom");
-const fetch = require("node-fetch");
-const { extractWithCloudflare } = require("./cloudflare");
-const { Readability } = require("@mozilla/readability");
+const turndownService = new TurndownService({
+  headingStyle: 'atx',
+  hr: '---',
+  bulletListMarker: '*'
+});
 
-/**
- * Extract text using Mozilla Readability.
- */
-function extractUsingReadability(html, url) {
+// PASS THE PROMPT HERE
+async function extractContent(url, userPrompt = "") {
+  let browser;
   try {
-    const dom = new JSDOM(html, { url });
-    const reader = new Readability(dom.window.document);
-    const article = reader.parse();
+    console.log(`[Extractor] Launching browser for: ${url}`);
+    browser = await chromium.launch({ headless: true });
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    });
+    const page = await context.newPage();
 
-    if (!article || !article.textContent || article.textContent.length < 80) {
-      return { success: false, error: "Insufficient content (Readability)" };
-    }
+    await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
+    
+    // --- NEW: Trigger Lazy Loading ---
+    // Scroll down slightly to make sure dynamic news cards load
+    await page.evaluate(() => window.scrollBy(0, 800));
+    await page.waitForTimeout(1000); 
 
-    return {
-      success: true,
-      method: "readability",
-      title: article.title || "",
-      text: article.textContent
-    };
-  } catch (err) {
-    return { success: false, error: err.message };
-  }
-}
-
-/**
- * Basic fallback extractor.
- */
-function extractUsingBasicParser(html, url) {
-  try {
-    const dom = new JSDOM(html, { url });
+    const html = await page.content();
+    const title = await page.title();
+    const dom = new JSDOM(html);
     const doc = dom.window.document;
 
-    Array.from(doc.querySelectorAll("script, style, nav, footer")).forEach(el =>
-      el.remove()
-    );
+    // --- NEW: Identify Intent ---
+    const isListTask = /news|headline|list|top|latest/i.test(userPrompt);
 
-    const main =
-      doc.querySelector("main") ||
-      doc.querySelector("article") ||
-      doc.querySelector("body");
+    let extractedText = "";
+    let method = "";
 
-    const text = (main?.textContent || "")
-      .replace(/\s+/g, ' ')
-      .replace(/(Advertisement|ADVT|Sponsored|Subscriber Only|Best Of Premium)/gi, '')
-      .replace(/([A-Za-z]+\s+News\s+Update:.*?)\d{4}/gi, '')
-      .replace(/(Latest News|Trending|Most Read|Top Stories)/gi, '')
-      .replace(/[\|\•\(\)\[\]]+/g, ' ')
-      .replace(/.{4000,}$/s, '')   // hard limit input to 4000 chars
-      .trim();
+    // STRATEGY A: For "List" tasks (Headlines, Top News)
+    if (isListTask) {
+      console.log("[Extractor] List task detected: Using Structural Markdown");
+      
+      // Target the 'main' content or 'body'
+      const container = doc.querySelector('main') || doc.querySelector('body');
+      
+      // CLEAN THE JUNK: Remove things that confuse LLMs
+      const junkSelectors = ['script', 'style', 'noscript', 'iframe', 'header', 'footer', 'nav', '.ads', '.cookie-banner'];
+      junkSelectors.forEach(sel => {
+        container.querySelectorAll(sel).forEach(el => el.remove());
+      });
 
-    if (text.length < 150) {
-      return { success: false, error: "Insufficient content (Basic)" };
+      extractedText = turndownService.turndown(container.innerHTML);
+      // console.log("Extracted Text: ", extractedText);
+      method = "playwright-markdown-structural";
+    } 
+    // STRATEGY B: For Deep-Dive Articles
+    else {
+      console.log("[Extractor] Article task detected: Using Readability");
+      const reader = new Readability(doc);
+      const article = reader.parse();
+      
+      if (article && article.textContent.length > 800) {
+        extractedText = article.textContent;
+        method = "readability";
+      } else {
+        extractedText = turndownService.turndown(doc.body.innerHTML);
+        method = "playwright-fallback";
+      }
     }
+
+    await browser.close();
 
     return {
       success: true,
-      method: "basic-parser",
-      title: doc.querySelector("title")?.textContent || "",
-      text
+      text: extractedText.substring(0, 25000), // Increased limit for Gemini
+      title: title,
+      method: method
     };
+
   } catch (err) {
+    if (browser) await browser.close();
     return { success: false, error: err.message };
   }
-}
-
-/**
- * Extract from URL
- */
-async function extractContent(url) {
-  console.log(`[Extractor] Fetching: ${url}`);
-
-  // --------------------------
-  // 1. TRY CLOUDFLARE FIRST (DISABLED - endpoint returns 404)
-  // --------------------------
-  // Cloudflare Browser Rendering endpoint is not available or not configured correctly.
-  // Uncomment below to re-enable if you have the correct endpoint setup.
-  /*
-  try {
-    console.log("[Extractor] Attempting Cloudflare...");
-
-    const cf = await extractWithCloudflare(url);
-
-    if (cf && typeof cf === "string" && cf.trim().length > 200) {
-      console.log(`[Extractor] ✓ Cloudflare success (${cf.length} chars)`);
-      return { success: true, method: "cloudflare", title: null, text: cf };
-    } else {
-      console.warn("[Extractor] Cloudflare returned insufficient text.");
-    }
-
-  } catch (err) {
-    console.warn(`[Extractor] Cloudflare error: ${err.message}`);
-  }
-  */
-
-  // --------------------------
-  // 2. FETCH RAW HTML
-  let html;
-  try {
-    const res = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0 AeraCronFetcher" }
-    });
-
-    html = await res.text();
-  } catch (err) {
-    return { success: false, error: `HTTP fetch failed: ${err.message}` };
-  }
-
-  // --------------------------
-  // 3. READABILITY
-  // --------------------------
-  console.log("[Extractor] Attempting Readability...");
-  const readable = extractUsingReadability(html, url);
-
-  if (readable.success) {
-    console.log(
-      `[Extractor] ✓ Readability success (${readable.text.length} chars)`
-    );
-    return readable;
-  }
-
-  // --------------------------
-  // 4. BASIC PARSER
-  // --------------------------
-  console.log("[Extractor] Attempting Basic parser...");
-  const basic = extractUsingBasicParser(html, url);
-
-  if (basic.success) {
-    console.log(
-      `[Extractor] ✓ Basic parser success (${basic.text.length} chars)`
-    );
-    return basic;
-  }
-
-  // --------------------------
-  // 5. FINAL FAILURE
-  // --------------------------
-  return {
-    success: false,
-    error: `All methods failed. Readability: ${readable.error}, Basic: ${basic.error}`
-  };
 }
 
 module.exports = { extractContent };
