@@ -23,11 +23,13 @@ jobs:
       - name: Install dependencies
         run: npm install --ignore-scripts
 
-      - name: Ensure Playwright is ready
-        uses: microsoft/playwright-github-action@v1
+      # 1. Update Playwright to the latest version to ensure Ubuntu 24.04 support
+      - name: Update Playwright
+        run: npm install @playwright/test@latest
 
-      - name: Install Playwright Browsers
-        run: npx playwright install chromium --with-deps
+      # 2. Use the official CLI to install Chromium and its system dependencies
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
 
 
       - name: Run workflow scheduler
