@@ -2,6 +2,7 @@ const db = require('./db');
 const { extractContent } = require('./extractor');
 const { summarizeText } = require('./llm-client');
 const { sendEmail } = require('./notifier');
+const sleep = (ms) => new Promise(resolve => resolve(setTimeout(resolve, ms)));
 
 /**
  * Check if workflow is due to run
@@ -70,22 +71,24 @@ async function runWorkflowRow(workflow) {
     const systemPersona = personas[type] || personas.general;
 
     const enhancedPrompt = `
-      STRICT COMMAND: ${systemPersona} 
-      TASK: "${prompt}"
-      
-      CONTEXT (WEBPAGE CONTENT):
-      ---
-      ${extraction.text}
-      ---
+  STRICT COMMAND: ${systemPersona} 
+  TASK: "${workflow.prompt}"
+  
+  CONTEXT (WEBPAGE CONTENT):
+  ---
+  ${extraction.text}
+  ---
 
-      RULES FOR OUTPUT:
-      1. If the task specifies a count (e.g. 5 items), return EXACTLY that many.
-      2. If a language is specified (Hindi/Gujarati), the entire response MUST be in that language.
-      3. CLEANUP: No conversational filler. No "Here is your summary". Just the data.
-      4. WHITESPACE: Do not leave large gaps or weird character spacing.
-      
-      FINAL CONFIRMATION: Perform the task "${prompt}" now.
-    `;
+  OUTPUT RULES:
+  1. You MUST find exactly 5 distinct items.
+  2. You MUST return a Numbered List (1. , 2. , 3. , 4. , 5. ) if told to do so.
+  3. Language: Output in the language asked by user, if none asked, default is english
+  4. LENGTH: Each headline should be 1-2 sentences.
+  2. DATA SOURCE: Only use information from the CONTEXT provided. Do NOT use your internal knowledge to guess the news.
+
+  
+  STRICT: DO NOT summarize into one paragraph. I need a list of 5.
+`;
 
     const rawSummary = await summarizeText(extraction.text, enhancedPrompt);
 
@@ -159,6 +162,10 @@ async function processWorkflows() {
       const result = await runWorkflowRow(workflow);
       summary.results.push(result);
       summary.processed++;
+
+      // ADD THIS DELAY HERE 👇 (Wait 5 seconds between each LLM call)
+      console.log("💤 Cooling down for 5 seconds to prevent Rate Limit (429)...");
+      await sleep(5000);
 
       if (result.success) summary.success++;
       else summary.failed++;

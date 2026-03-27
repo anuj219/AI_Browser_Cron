@@ -3,11 +3,12 @@ require("dotenv").config();
 
 const LLM_API_URL = process.env.LLM_API_URL;   // For Gemini → leave empty
 const LLM_API_KEY = process.env.LLM_API_KEY;
-const LLM_MODEL = process.env.LLM_MODEL || "gemini-1.5-flash"; // or gemini-1.5-pro
+const LLM_MODEL = process.env.LLM_MODEL; // or gemini-1.5-pro
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_API_URL = process.env.OPENAI_API_URL || 'https://api.openai.com/v1/chat/completions';
-const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-3.5-turbo';
+// const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+// const OPENAI_API_URL = process.env.OPENAI_API_URL || 'https://api.openai.com/v1/chat/completions';
+// const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-3.5-turbo';
+const GROQ_API_KEY = process.env.OTHER_API_KEY;
 
 /**
  * Detect if using Google Gemini
@@ -57,7 +58,8 @@ function extractGeminiText(data) {
  * Call Google Gemini API with modern universal format
  */
 async function callGeminiAPI(text, userPrompt) {
-  const url = `https://generativelanguage.googleapis.com/v1/models/${LLM_MODEL}:generateContent?key=${LLM_API_KEY}`;
+  // const url = `https://generativelanguage.googleapis.com/v1/models/${LLM_MODEL}:generateContent?key=${LLM_API_KEY}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${LLM_MODEL}:generateContent?key=${LLM_API_KEY}`;
 
   const requestBody = {
     contents: [
@@ -71,8 +73,8 @@ async function callGeminiAPI(text, userPrompt) {
       }
     ],
     generationConfig: {
-      maxOutputTokens: 600,
-      temperature: 0.7,
+      max_output_tokens: 1024, // Increased from likely 100-200
+      temperature: 0.1,        // Low temperature makes it more accurate with lists
     }
   };
 
@@ -128,101 +130,79 @@ async function callGeminiAPI(text, userPrompt) {
 }
 
 /**
- * OpenAI-like API (unused, but kept for fallback)
+ * Groq API (The reliable 2026 fallback)
  */
-async function callOpenAIAPI(text, userPrompt) {
-  if (!OPENAI_API_KEY) throw new Error('OPENAI_API_KEY not configured');
-
-  const messages = [
-    { role: 'system', content: 'You are a helpful assistant that creates concise, accurate summaries.' },
-    { role: 'user', content: `${userPrompt}\n\nContent:\n${text.substring(0, 4000)}` }
-  ];
+async function callGroqAPI(text, userPrompt) {
+  if (!GROQ_API_KEY) throw new Error('GROQ_API_KEY not configured');
 
   const body = {
-    model: OPENAI_MODEL,
-    messages,
-    max_tokens: 500,
-    temperature: 0.7
+    model: "llama-3.3-70b-versatile",
+    messages: [
+      { role: 'system', content: 'You are an expert news editor. Clean up formatting and follow the task exactly.' },
+      { role: 'user', content: `${userPrompt}\n\nContent:\n${text}` }
+    ],
+    max_tokens: 1500, // Increased for full translation lists
+    temperature: 0.2
   };
 
-  // Diagnostics
-  try {
-    console.log('[LLM] OpenAI request snapshot (trimmed):', JSON.stringify(body).substring(0, 1000));
-    console.log('[LLM] OpenAI endpoint (safe):', OPENAI_API_URL);
-  } catch (e) {}
-
-  const res = await fetch(OPENAI_API_URL, {
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${OPENAI_API_KEY}`
+      'Authorization': `Bearer ${GROQ_API_KEY}`
     },
-    body: JSON.stringify(body),
-    timeout: 30000
+    body: JSON.stringify(body)
   });
 
-  const txt = await res.text();
-  let data;
-  try { data = JSON.parse(txt); } catch (e) { throw new Error(`OpenAI returned non-JSON response: ${txt.substring(0,300)}`); }
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Groq API error ${res.status}: ${data.error?.message || 'Unknown'}`);
 
-  if (!res.ok) {
-    throw new Error(`OpenAI API error ${res.status}: ${txt.substring(0,500)}`);
-  }
-
-  const content = data.choices?.[0]?.message?.content || data.choices?.[0]?.text;
-  if (typeof content === 'string' && content.trim()) return content.trim();
-
-  throw new Error('OpenAI returned empty or unrecognized format');
+  return data.choices?.[0]?.message?.content?.trim() || "";
 }
 
 /**
  * MAIN summarizer entry
  */
 async function summarizeText(rawText, userPrompt = "Provide a concise summary") {
-  if (!LLM_API_KEY && !OPENAI_API_KEY) throw new Error("No LLM API key configured (LLM_API_KEY or OPENAI_API_KEY required)");
+  if (!LLM_API_KEY && !GROQ_API_KEY) throw new Error("No API keys configured");
   if (!rawText || !rawText.trim()) throw new Error("Empty text to summarize");
 
   const cleaned = rawText.replace(/\s+/g, " ").trim();
 
-  // 1) Try Gemini if key present
+  // 1) PRIMARY: Try Gemini
   if (LLM_API_KEY) {
     try {
-      console.log("[LLM] Using Google Gemini API...");
+      console.log("[LLM] Using Google Gemini API (Primary)...");
       return await callGeminiAPI(cleaned, userPrompt);
     } catch (err) {
-      console.error("LLM summarization error (Gemini):", err.message);
+      console.error("[LLM] Gemini Primary Failed:", err.message);
 
-      // small-input fallback for Gemini
-      if (/empty or unrecognized format|returned non-JSON response/i.test(err.message)) {
+      // Handle specific "Messy HTML" or "Empty Result" with a small-input fallback
+      if (/empty|unrecognized|json/i.test(err.message)) {
         try {
-          const small = cleaned.substring(0, 800);
-          console.log('[LLM] Attempting Gemini small-input fallback (800 chars)');
-          const smallSummary = await callGeminiAPI(small, `${userPrompt} (short-input fallback)`);
-          console.log('[LLM] Gemini small-input fallback succeeded');
-          return smallSummary;
+          const small = cleaned.substring(0, 1000);
+          console.log('[LLM] Attempting Gemini small-input fallback...');
+          return await callGeminiAPI(small, `${userPrompt} (short-input fallback)`);
         } catch (err2) {
           console.error('[LLM] Gemini small-input fallback failed:', err2.message);
         }
       }
-      // If Gemini fails entirely, fall through to OpenAI (if available)
+      // If we are here, Gemini is totally out. Fall through to Groq.
     }
   }
 
-  // 2) Try OpenAI fallback if configured
-  if (OPENAI_API_KEY) {
+  // 2) FALLBACK: Try Groq
+  if (GROQ_API_KEY) {
     try {
-      console.log('[LLM] Falling back to OpenAI API...');
-      return await callOpenAIAPI(cleaned, userPrompt);
+      console.log('[LLM] Gemini down. Triggering Groq Fallback...');
+      return await callGroqAPI(cleaned, userPrompt);
     } catch (err) {
-      console.error('[LLM] OpenAI fallback failed:', err.message);
+      console.error('[LLM] Groq Fallback failed:', err.message);
       throw err;
     }
   }
 
-  // 3) No provider succeeded
-  throw new Error('All LLM providers failed to produce a summary');
+  throw new Error('All LLM providers (Gemini & Groq) failed');
 }
 
-module.exports = {
-  summarizeText,
-};
+module.exports = { summarizeText };
