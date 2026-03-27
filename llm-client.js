@@ -58,8 +58,8 @@ function extractGeminiText(data) {
  * Call Google Gemini API with modern universal format
  */
 async function callGeminiAPI(text, userPrompt) {
-  // const url = `https://generativelanguage.googleapis.com/v1/models/${LLM_MODEL}:generateContent?key=${LLM_API_KEY}`;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${LLM_MODEL}:generateContent?key=${LLM_API_KEY}`;
+  const url = `https://generativelanguage.googleapis.com/v1/models/${LLM_MODEL}:generateContent?key=${LLM_API_KEY}`;
+  // const url = `https://generativelanguage.googleapis.com/v1beta/models/${LLM_MODEL}:generateContent?key=${LLM_API_KEY}`;
 
   const requestBody = {
     contents: [
