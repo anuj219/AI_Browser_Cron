@@ -61,6 +61,8 @@ async function callGeminiAPI(text, userPrompt) {
   const url = `https://generativelanguage.googleapis.com/v1/models/${LLM_MODEL}:generateContent?key=${LLM_API_KEY}`;
   // const url = `https://generativelanguage.googleapis.com/v1beta/models/${LLM_MODEL}:generateContent?key=${LLM_API_KEY}`;
 
+  Console.log(`Gemini Key :::::: ${LLM_API_KEY}`);
+
   const requestBody = {
     contents: [
       {
@@ -134,6 +136,8 @@ async function callGeminiAPI(text, userPrompt) {
  */
 async function callGroqAPI(text, userPrompt) {
   if (!GROQ_API_KEY) throw new Error('GROQ_API_KEY not configured');
+
+  Console.log(`GROQ Key :::::: ${GROQ_API_KEY}`);
 
   // 1. THE SLICE: Ensure we stay under ~9,000 tokens to leave room for the prompt/response
   const maxChars = 15000;
