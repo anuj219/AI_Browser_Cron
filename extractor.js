@@ -1,8 +1,11 @@
 const { chromium } = require('playwright');
 const TurndownService = require('turndown');
 const { Readability } = require('@mozilla/readability');
-const { JSDOM } = require('jsdom');
+const { JSDOM, VirtualConsole } = require('jsdom');
 
+// This stops JSDOM from screaming about CSS it doesn't understand
+const virtualConsole = new VirtualConsole();
+virtualConsole.on("error", () => { /* Silence is golden */ });
 const turndownService = new TurndownService({
   headingStyle: 'atx',
   hr: '---',
@@ -11,7 +14,7 @@ const turndownService = new TurndownService({
 
 // PASS THE PROMPT HERE
 async function extractContent(url, userPrompt = "") {
-let browser;
+  let browser;
   try {
     browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({
@@ -25,7 +28,7 @@ let browser;
     });
 
     const page = await context.newPage();
-    
+
     // Set extra headers to look like a real browser
     await page.setExtraHTTPHeaders({
       'Accept-Language': 'en-US,en;q=0.9',
@@ -34,18 +37,18 @@ let browser;
 
     console.log(`[Extractor] Navigating to: ${url}`);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    
+
     // Human breather
-    await page.waitForTimeout(Math.floor(Math.random() * 2000) + 2000); 
+    await page.waitForTimeout(Math.floor(Math.random() * 2000) + 2000);
 
     const html = await page.content();
     if (html.includes("Access Denied")) {
-        // Try one more thing: scroll and wait
-        await page.evaluate(() => window.scrollTo(0, 400));
-        await page.waitForTimeout(2000);
+      // Try one more thing: scroll and wait
+      await page.evaluate(() => window.scrollTo(0, 400));
+      await page.waitForTimeout(2000);
     }
     const title = await page.title();
-    const dom = new JSDOM(html);
+    const dom = new JSDOM(html, { virtualConsole });
     const doc = dom.window.document;
 
     // --- NEW: Identify Intent ---

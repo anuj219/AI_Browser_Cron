@@ -35,9 +35,7 @@ function cleanTextForLLM(raw) {
     .trim();
 }
 
-/**
- * Run a single workflow row
- */
+// Running single workflow
 async function runWorkflowRow(workflow) {
   const { id, url, prompt, notify_type, email, type } = workflow;
 
@@ -47,9 +45,8 @@ async function runWorkflowRow(workflow) {
 
   try {
     // 1. EXTRACTION
-    console.log(`\n[Workflow ${id}] Strategy: ${type || 'general'} | URL: ${url}`);
+    console.log(`\n[Workflow ${id}] Type: ${type || 'general'} | URL: ${url}`);
     const extraction = await extractContent(url, prompt);
-
     if (!extraction.success) throw new Error(extraction.error);
 
     result.metadata = {
@@ -58,48 +55,78 @@ async function runWorkflowRow(workflow) {
       extractedLength: extraction.text.length
     };
 
-    // 2. LLM EXECUTION (The Corrected Persona + Sandwich Prompt)
-    console.log(`[Workflow ${id}] Executing Agent...`);
+    // 2. BIFURCATED PROMPT LOGIC
+    let systemPersona = "";
+    let finalPrompt = "";
 
-    const personas = {
-      news_headlines: "You are a professional News Editor. Extract 5 clear headlines.",
-      price_tracker: "You are a Financial Data Analyst. Find the exact price or numerical value.",
-      summary: "You are a Research Assistant. Provide a concise executive summary.",
-      general: "You are an AI Browser Agent."
-    };
+    if (type === 'price_tracker') {
+      systemPersona = "You are a precise Financial Data Watchdog.";
+      finalPrompt = `
+        STRICT TASK: "${prompt}"
+        
+        CONTEXT (WEBPAGE):
+        ---
+        ${extraction.text}
+        ---
 
-    const systemPersona = personas[type] || personas.general;
+        RULES:
+        1. THRESHOLD CHECK: Look at the limit mentioned in the TASK. 
+        2. If the current price is HIGHER than the limit, return exactly: [[NO_ACTION]]
+        3. If the price is AT or BELOW the limit, provide a 1-sentence alert (Price vs Limit).
+        4. If the page shows "Access Denied" or "Out of Stock", report that instead.
+        5. Return ONLY the result. No filler.
+      `;
+    } 
+    else if (type === 'news_headlines') {
+      systemPersona = "You are a professional News Editor.";
+      finalPrompt = `
+        STRICT TASK: "${prompt}"
+        
+        CONTEXT (WEBPAGE):
+        ---
+        ${extraction.text}
+        ---
 
-    const enhancedPrompt = `
-  STRICT COMMAND: ${systemPersona} 
-  TASK: "${workflow.prompt}"
-  
-  CONTEXT (WEBPAGE CONTENT):
-  ---
-  ${extraction.text}
-  ---
+        RULES:
+        1. LIST: Return exactly 5 distinct headlines.
+        2. FORMAT: Numbered list (1-5).
+        3. LANGUAGE: Detect from TASK, otherwise use English.
+        4. CLEANUP: No conversational filler or "Here is your news" intro.
+      `;
+    } 
+    else {
+      systemPersona = "You are a helpful Research Assistant.";
+      finalPrompt = `
+        TASK: "${prompt}"
+        CONTEXT: ${extraction.text}
+        RULE: Provide a concise, professional executive summary.
+      `;
+    }
 
-  OUTPUT RULES:
-  1. You MUST find exactly 5 distinct items.
-  2. You MUST return a Numbered List (1. , 2. , 3. , 4. , 5. ) if told to do so.
-  3. Language: Output in the language asked by user, if none asked, default is english
-  4. LENGTH: Each headline should be 1-2 sentences.
-  2. DATA SOURCE: Only use information from the CONTEXT provided. Do NOT use your internal knowledge to guess the news.
+    // 3. LLM EXECUTION
+    console.log(`[Workflow ${id}] Consulting the ${systemPersona}...`);
+    const rawSummary = await summarizeText(extraction.text, finalPrompt);
 
-  
-  STRICT: DO NOT summarize into one paragraph. I need a list of 5.
-`;
+    // 4. THE SILENCE CHECK (Bifurcation Part 2)
+    if (type === 'price_tracker' && rawSummary.includes('[[NO_ACTION]]')) {
+      console.log(`[Workflow ${id}] Price threshold not met. Silence Protocol active.`);
+      
+      // We update the 'last_run' so it doesn't loop, but we DON'T save a result
+      await db.updateWorkflow(id, { last_run: new Date().toISOString(), status: "active" });
+      
+      result.summary = "Threshold not met (Silent)";
+      result.success = true;  
+      return result;
+    }
 
-    const rawSummary = await summarizeText(extraction.text, enhancedPrompt);
-
-    // SANITIZER: This kills the "Hindi Gap" bug
+    // 5. SANITIZER & PERSISTENCE (For successful alerts/news)
     result.summary = rawSummary
-      .replace(/[^\S\r\n]{2,}/g, ' ') // Collapses multiple spaces but keeps newlines
-      .replace(/\n{3,}/g, '\n\n')    // Prevents massive vertical voids
+      .replace(/[^\S\r\n]{2,}/g, ' ') 
+      .replace(/\n{3,}/g, '\n\n')
       .trim();
 
-    // 3. PERSISTENCE
-    console.log(`[Workflow ${id}] Saving result...`);
+    console.log(`[Workflow ${id}] Alert Condition Met! Saving...`);
+    
     await db.createWorkflowResult({
       workflow_id: id,
       summary: result.summary,
@@ -108,17 +135,17 @@ async function runWorkflowRow(workflow) {
       seen: notify_type === "email"
     });
 
-    // 4. NOTIFICATION (Optional)
+    // 6. NOTIFICATION
     if (notify_type === "email" && email) {
       await sendEmail({
         to: email,
-        subject: `Aera Workflow: ${result.metadata.title}`,
+        subject: `Aera Alert: ${result.metadata.title}`,
         summary: result.summary,
         title: result.metadata.title
       });
     }
 
-    // 5. UPDATE STATE
+    // 7. UPDATE STATE
     await db.updateWorkflow(id, {
       last_run: new Date().toISOString(),
       status: "active"

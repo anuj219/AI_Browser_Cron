@@ -135,11 +135,17 @@ async function callGeminiAPI(text, userPrompt) {
 async function callGroqAPI(text, userPrompt) {
   if (!GROQ_API_KEY) throw new Error('GROQ_API_KEY not configured');
 
+  // 1. THE SLICE: Ensure we stay under ~9,000 tokens to leave room for the prompt/response
+  const maxChars = 15000;
+  const slicedText = text.length > maxChars
+    ? text.substring(0, maxChars) + "... [Truncated for Token Limits]"
+    : text;
+
   const body = {
     model: "llama-3.3-70b-versatile",
     messages: [
       { role: 'system', content: 'You are an expert news editor. Clean up formatting and follow the task exactly.' },
-      { role: 'user', content: `${userPrompt}\n\nContent:\n${text}` }
+      { role: 'user', content: `${userPrompt}\n\nContent:\n${slicedText}` }
     ],
     max_tokens: 1500, // Increased for full translation lists
     temperature: 0.2
