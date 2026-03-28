@@ -33,7 +33,14 @@ jobs:
 
 
       - name: Run workflow scheduler
+        env:
+            # Mapping GitHub Secrets to Node.js process.env
+            SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+            SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }} # Note: You named it SUPABASE_KEY in secrets
+            LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+            LLM_API_URL: ${{ secrets.LLM_API_URL }}
+            LLM_MODEL: ${{ secrets.LLM_MODEL }}
+            GROQ_API_KEY: ${{ secrets.OTHER_API_KEY }} # Mapping your 'OTHER' key to Groq logic
+            GMAIL_USER: ${{ secrets.GMAIL_USER }}
+            GMAIL_APP_PASS: ${{ secrets.GMAIL_APP_PASS }}
         run: node cron-runner.js
-        # env:
-        #   SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-        #   SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
