@@ -2,7 +2,7 @@ const fetch = require("node-fetch");
 require("dotenv").config();
 
 const LLM_API_URL = process.env.LLM_API_URL;   // For Gemini → leave empty
-const LLM_API_KEY = process.env.LLM_API_KEYO;
+const LLM_API_KEY = process.env.LLM_API_KEY;
 const LLM_MODEL = process.env.LLM_MODEL; // or gemini-1.5-pro
 
 // const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
