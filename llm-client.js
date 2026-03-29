@@ -61,7 +61,6 @@ async function callGeminiAPI(text, userPrompt) {
   const url = `https://generativelanguage.googleapis.com/v1/models/${LLM_MODEL}:generateContent?key=${LLM_API_KEY}`;
   // const url = `https://generativelanguage.googleapis.com/v1beta/models/${LLM_MODEL}:generateContent?key=${LLM_API_KEY}`;
 
-  console.log(`Gemini Key :::::: ${LLM_API_KEY}`);
 
   const requestBody = {
     contents: [
@@ -69,7 +68,7 @@ async function callGeminiAPI(text, userPrompt) {
         role: "user",
         parts: [
           {
-            text: `${userPrompt}\n\n${text.substring(0, 4000)}`
+            text: `${userPrompt}\n\n${text.substring(0, 30000)}`
           }
         ]
       }
@@ -137,7 +136,6 @@ async function callGeminiAPI(text, userPrompt) {
 async function callGroqAPI(text, userPrompt) {
   if (!GROQ_API_KEY) throw new Error('GROQ_API_KEY not configured');
 
-  console.log(`GROQ Key :::::: ${GROQ_API_KEY}`);
 
   // 1. THE SLICE: Ensure we stay under ~9,000 tokens to leave room for the prompt/response
   const maxChars = 15000;
@@ -215,4 +213,19 @@ async function summarizeText(rawText, userPrompt = "Provide a concise summary") 
   throw new Error('All LLM providers (Gemini & Groq) failed');
 }
 
-module.exports = { summarizeText };
+async function extractWeatherParams(userPrompt) {
+  const systemPrompt = "Extract the city/location from the user's weather request. Return ONLY a JSON object: {\"location\": \"CityName\"}. Default to 'Mumbai' if none found.";
+  
+  // Directly calling your Groq fallback logic
+  const rawJson = await callGroqAPI("N/A", `${systemPrompt}\n\nUser Request: ${userPrompt}`);
+  
+  try {
+    const cleanJson = rawJson.replace(/```json|```/g, "").trim();
+    return JSON.parse(cleanJson);
+  } catch (e) {
+    console.error("[Weather] Param extraction failed, using default.");
+    return { location: "Mumbai" };
+  }
+}
+
+module.exports = { summarizeText , extractWeatherParams};

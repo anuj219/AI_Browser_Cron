@@ -1,6 +1,7 @@
 const db = require('./db');
 const { extractContent } = require('./extractor');
-const { summarizeText } = require('./llm-client');
+const { summarizeText, extractWeatherParams } = require('./llm-client');
+const { getRichWeatherData } = require('./weather');
 const { sendEmail } = require('./notifier');
 const sleep = (ms) => new Promise(resolve => resolve(setTimeout(resolve, ms)));
 
@@ -43,90 +44,126 @@ async function runWorkflowRow(workflow) {
     workflowId: id, success: false, summary: null, metadata: {}, error: null
   };
 
+  let extraction = { method: 'none', title: 'none', text: '' };
+  let contextForLLM = '';
+
   try {
     // 1. EXTRACTION
     console.log(`\n[Workflow ${id}] Type: ${type || 'general'} | URL: ${url}`);
-    const extraction = await extractContent(url, prompt);
-    if (!extraction.success) throw new Error(extraction.error);
+
+    // --- NEW: THE WEATHER AGENT PRE-PROCESSOR ---
+    if (type === 'fetch_weather') {
+      console.log(`[Weather Agent] Extracting parameters from: "${prompt}"`);
+      const params = await extractWeatherParams(prompt);
+
+      contextForLLM = await getRichWeatherData(params.location);
+      console.log(`[Weather Agent] Formulated URL: ${url}`);
+      
+      extraction.method = 'weather-api';
+      extraction.title = `Weather for ${params.location || 'Unknown'}`;
+      extraction.text = contextForLLM || '';
+    }
+    else {
+      // STANDARD EXTRACTION (Playwright)
+      extraction = await extractContent(url, prompt);
+      if (!extraction.success) throw new Error(extraction.error);
+    }
 
     result.metadata = {
       method: extraction.method,
       title: extraction.title,
-      extractedLength: extraction.text.length
+      extractedLength: extraction.text ? extraction.text.length : 0
     };
 
     // 2. BIFURCATED PROMPT LOGIC
     let systemPersona = "";
     let finalPrompt = "";
 
-    if (type === 'price_tracker') {
-      systemPersona = "You are a precise Financial Data Watchdog.";
-      finalPrompt = `
-        STRICT TASK: "${prompt}"
-        
-        CONTEXT (WEBPAGE):
-        ---
-        ${extraction.text}
-        ---
+    switch (type) {
+      case 'price_tracker':
+        systemPersona = "You are a precise Financial Data Watchdog.";
+        // We prioritize the hidden 'Source of Truth'
 
-        RULES:
-        1. THRESHOLD CHECK: Look at the limit mentioned in the TASK. 
-        2. If the current price is HIGHER than the limit, return exactly: [[NO_ACTION]]
-        3. If the price is AT or BELOW the limit, provide a 1-sentence alert (Price vs Limit).
-        4. If the page shows "Access Denied" or "Out of Stock", report that instead.
-        5. Return ONLY the result. No filler.
-      `;
-    } 
-    else if (type === 'news_headlines') {
-      systemPersona = "You are a professional News Editor.";
-      finalPrompt = `
-        STRICT TASK: "${prompt}"
-        
-        CONTEXT (WEBPAGE):
-        ---
-        ${extraction.text}
-        ---
+        // DIRECT USE: extraction.structured is already the product info
+        const productData = extraction.structured;
+        console.log(`[Workflow ${id}] Structured Data detected:`, productData?.price || 'No price in JSON');
 
-        RULES:
-        1. LIST: Return exactly 5 distinct headlines.
-        2. FORMAT: Numbered list (1-5).
-        3. LANGUAGE: Detect from TASK, otherwise use English.
-        4. CLEANUP: No conversational filler or "Here is your news" intro.
-      `;
-    } 
-    else {
-      systemPersona = "You are a helpful Research Assistant.";
-      finalPrompt = `
-        TASK: "${prompt}"
-        CONTEXT: ${extraction.text}
-        RULE: Provide a concise, professional executive summary.
-      `;
+        contextForLLM = productData
+          ? `OFFICIAL DATA: ${JSON.stringify(productData)}`
+          : `CLEANED WEBPAGE: ${extraction.text.substring(0, 10000)}`;
+
+        // Specialized Prompt for Data accuracy
+        finalPrompt = `
+          Identity : ${systemPersona},
+          TASK: "${prompt}"\nCONTEXT: ${contextForLLM}\n
+          RULE: If price > limit, return [[NO_ACTION]]. 
+          Otherwise, 1-sentence alert based on user prompt task. 
+          Ignore 'Sponsored' or 'Related' items. 
+          If no Price found, then also return exactly [[NO_ACTION]]`;
+        break;
+      // Inside runWorkflowRow switch(type) block:
+
+      case 'fetch_weather':
+        systemPersona = "Professional Weather Assitant";
+        finalPrompt = `
+          Identity: ${systemPersona},
+          USER REQUEST: "${prompt}"
+          DATA: ${contextForLLM}
+          
+          TASK: Extract ONLY the details the user asked for from the DATA.
+          RULES: 
+          1. Answer the user's specific question (e.g., if they asked about rain, focus on rain).
+          2. Give a concise, helpful summary.
+          3. Use metric units (°C, km/h).
+        `;
+        break;
+
+      case 'news_headlines':
+        systemPersona = "You are a News Editor.";
+        contextForLLM = extraction.text; // Use full structural markdown
+        finalPrompt = `
+        Identity : ${systemPersona},
+        TASK: "${prompt}".\nCONTEXT: ${contextForLLM}
+                RULES:
+                  1. LIST: Return exactly number of headlines asked by user.
+                  2. FORMAT: Numbered list (1-n).
+                  3. LANGUAGE: Detect from TASK, otherwise use English.
+                  4. CLEANUP: No conversational filler or "Here is your news" intro.
+                `;
+        break;
+
+      default: // summary
+        systemPersona = "You are a Research Assistant.";
+        contextForLLM = extraction.text.substring(0, 15000);
+        finalPrompt = `
+        Identity : ${systemPersona},
+        TASK: ${prompt} | or Summarize this if no prompt given.\nCONTEXT: ${contextForLLM}`;
     }
 
     // 3. LLM EXECUTION
     console.log(`[Workflow ${id}] Consulting the ${systemPersona}...`);
-    const rawSummary = await summarizeText(extraction.text, finalPrompt);
+    const rawSummary = await summarizeText(contextForLLM, finalPrompt);
 
     // 4. THE SILENCE CHECK (Bifurcation Part 2)
     if (type === 'price_tracker' && rawSummary.includes('[[NO_ACTION]]')) {
       console.log(`[Workflow ${id}] Price threshold not met. Silence Protocol active.`);
-      
+
       // We update the 'last_run' so it doesn't loop, but we DON'T save a result
       await db.updateWorkflow(id, { last_run: new Date().toISOString(), status: "active" });
-      
+
       result.summary = "Threshold not met (Silent)";
-      result.success = true;  
+      result.success = true;
       return result;
     }
 
     // 5. SANITIZER & PERSISTENCE (For successful alerts/news)
     result.summary = rawSummary
-      .replace(/[^\S\r\n]{2,}/g, ' ') 
+      .replace(/[^\S\r\n]{2,}/g, ' ')
       .replace(/\n{3,}/g, '\n\n')
       .trim();
 
     console.log(`[Workflow ${id}] Alert Condition Met! Saving...`);
-    
+
     await db.createWorkflowResult({
       workflow_id: id,
       summary: result.summary,
