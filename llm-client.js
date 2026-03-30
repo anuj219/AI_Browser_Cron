@@ -8,7 +8,7 @@ const LLM_MODEL = process.env.LLM_MODEL; // or gemini-1.5-pro
 // const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 // const OPENAI_API_URL = process.env.OPENAI_API_URL || 'https://api.openai.com/v1/chat/completions';
 // const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-3.5-turbo';
-const GROQ_API_KEY = process.env.OTHER_API_KEY;
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
 /**
  * Detect if using Google Gemini
@@ -217,7 +217,7 @@ async function extractWeatherParams(userPrompt) {
   const systemPrompt = "Extract the city/location from the user's weather request. Return ONLY a JSON object: {\"location\": \"CityName\"}. Default to 'Mumbai' if none found.";
   
   // Directly calling your Groq fallback logic
-  const rawJson = await callGroqAPI("N/A", `${systemPrompt}\n\nUser Request: ${userPrompt}`);
+  const rawJson = await callGroqAPI("N/A", `${systemPrompt}\n\nUser Request: ${userPrompt.substring(0,12000)}`);
   
   try {
     const cleanJson = rawJson.replace(/```json|```/g, "").trim();

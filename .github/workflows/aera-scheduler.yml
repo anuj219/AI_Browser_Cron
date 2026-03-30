@@ -40,7 +40,7 @@ jobs:
             LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
             LLM_API_URL: ${{ secrets.LLM_API_URL }}
             LLM_MODEL: ${{ secrets.LLM_MODEL }}
-            GROQ_API_KEY: ${{ secrets.OTHER_API_KEY }} # Mapping your 'OTHER' key to Groq logic
+            GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }} # Mapping your 'OTHER' key to Groq logic
             GMAIL_USER: ${{ secrets.GMAIL_USER }}
             GMAIL_APP_PASS: ${{ secrets.GMAIL_APP_PASS }}
         run: node cron-runner.js
