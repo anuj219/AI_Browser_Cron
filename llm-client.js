@@ -215,10 +215,10 @@ async function summarizeText(rawText, userPrompt = "Provide a concise summary") 
 
 async function extractWeatherParams(userPrompt) {
   const systemPrompt = "Extract the city/location from the user's weather request. Return ONLY a JSON object: {\"location\": \"CityName\"}. Default to 'Mumbai' if none found.";
-  
+
   // Directly calling your Groq fallback logic
-  const rawJson = await callGroqAPI("N/A", `${systemPrompt}\n\nUser Request: ${userPrompt.substring(0,12000)}`);
-  
+  const rawJson = await callGroqAPI("N/A", `${systemPrompt}\n\nUser Request: ${userPrompt.substring(0, 12000)}`);
+
   try {
     const cleanJson = rawJson.replace(/```json|```/g, "").trim();
     return JSON.parse(cleanJson);
@@ -228,4 +228,34 @@ async function extractWeatherParams(userPrompt) {
   }
 }
 
-module.exports = { summarizeText , extractWeatherParams};
+// For Price_tracker MCP
+async function generateExtractionSchema(userPrompt) {
+  const systemPrompt = `
+  You are an MCP Schema Generator for Firecrawl.
+  Analyze the user prompt and return ONLY a JSON object:
+  {
+    "use_mcp": true,
+    "domain": "ecommerce",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "price": { "type": "number", "description": "The current selling price" },
+        "name": { "type": "string", "description": "Product name" },
+        "currency": { "type": "string" }
+      },
+      "required": ["price"]
+    }
+  }
+  If it's not a price/fact request, set use_mcp to false.
+`;
+
+  const response = await callGroqAPI("N/A", `${systemPrompt}\n\nUser Prompt: ${userPrompt}`);
+
+  try {
+    return JSON.parse(response.replace(/```json|```/g, ""));
+  } catch (e) {
+    return { use_mcp: false, schema: {}, domain: "general" };
+  }
+}
+
+module.exports = { summarizeText, extractWeatherParams, generateExtractionSchema };

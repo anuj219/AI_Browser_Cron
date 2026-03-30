@@ -29,19 +29,19 @@ async function extractContent(url, userPrompt = "") {
 
     const page = await context.newPage();
 
-    
+
     // Set extra headers to look like a real browser
     await page.setExtraHTTPHeaders({
       'Accept-Language': 'en-US,en;q=0.9',
       'Referer': 'https://www.google.com/'
     });
-    
+
     console.log(`[Extractor] Navigating to: ${url}`);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    
+
     // Human breather
     await page.waitForTimeout(Math.floor(Math.random() * 2000) + 2000);
-    
+
     const structured = await extractStructuredData(page);
     console.log(`[Extractor] Structured Data Found: ${structured ? 'Yes' : 'No'}`);
 
@@ -56,7 +56,7 @@ async function extractContent(url, userPrompt = "") {
     const doc = dom.window.document;
 
     // --- NEW: Identify Intent ---
-    const isListTask = /news|headline|list|top|latest/i.test(userPrompt);
+    const isListTask = /news|headline|top|latest/i.test(userPrompt) && !/price|buy|cost/i.test(userPrompt);
 
     let extractedText = "";
     let method = "";
@@ -98,7 +98,7 @@ async function extractContent(url, userPrompt = "") {
     return {
       success: true,
       text: extractedText.substring(0, 25000), // Increased limit for Gemini
-      structured : structured,
+      structured: structured,
       title: title,
       method: method
     };
@@ -121,7 +121,7 @@ async function extractStructuredData(page) {
       try {
         const data = JSON.parse(tag.textContent);
         const items = Array.isArray(data) ? data : [data];
-        
+
         // Find the actual product entry
         const found = items.find(i => i['@type'] === 'Product' || i['@type'] === 'Offer');
         if (found) {
@@ -134,7 +134,7 @@ async function extractStructuredData(page) {
           };
           break;
         }
-      } catch (e) {}
+      } catch (e) { }
     }
 
     // 2. Fallback to Meta Tags (OpenGraph/Twitter) if JSON-LD failed
@@ -142,8 +142,8 @@ async function extractStructuredData(page) {
       productInfo = {
         source: 'meta-tags',
         name: document.querySelector('meta[property="og:title"]')?.content,
-        price: document.querySelector('meta[property="product:price:amount"]')?.content || 
-               document.querySelector('meta[name="twitter:data1"]')?.content,
+        price: document.querySelector('meta[property="product:price:amount"]')?.content ||
+          document.querySelector('meta[name="twitter:data1"]')?.content,
         currency: document.querySelector('meta[property="product:price:currency"]')?.content
       };
     }
@@ -160,7 +160,7 @@ async function extractStructuredData(page) {
 //     RULE: Return ONLY a JSON object like {"location": "CityName"}. 
 //     If no location is found, use "Mumbai".
 //   `;
-  
+
 //   // Use a cheap/fast model call (Gemini Flash is perfect here)
 //   const rawJson = await summarizeText("N/A", extractionPrompt);
 //   try {

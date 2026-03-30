@@ -1,9 +1,10 @@
 const db = require('./db');
 const { extractContent } = require('./extractor');
-const { summarizeText, extractWeatherParams } = require('./llm-client');
+const { summarizeText, extractWeatherParams, generateExtractionSchema } = require('./llm-client');
 const { getRichWeatherData } = require('./weather');
 const { sendEmail } = require('./notifier');
 const sleep = (ms) => new Promise(resolve => resolve(setTimeout(resolve, ms)));
+
 
 /**
  * Check if workflow is due to run
@@ -58,17 +59,76 @@ async function runWorkflowRow(workflow) {
 
       contextForLLM = await getRichWeatherData(params.location);
       console.log(`[Weather Agent] Formulated URL: ${url}`);
-      
+
       extraction.method = 'weather-api';
       extraction.title = `Weather for ${params.location || 'Unknown'}`;
       extraction.text = contextForLLM || '';
     }
+    else if (type === 'price_tracker') {
+      // 🚀 THE HYBRID MOVE: Analyze intent and run MCP + Scraper in PARALLEL
+      const intent = await generateExtractionSchema(prompt);  // refer this functoin to understand how AI prepares schema to get exact details from MCP based on domain (ecommerce, finance etc)
+      console.log(`[Price Agent] Intent: ${intent.domain}, Use MCP: ${intent.use_mcp}`);
+
+      let mcpTask = Promise.resolve(null);
+      // MCP LOGIC (FIRECRAWL) ------------------------------------------------------------------------------------------
+      if (intent.use_mcp && process.env.FIRECRAWL_API_KEY) {
+        // 🚀 DYNAMIC IMPORT (The 2026 way to fix CJS/ESM errors)
+        const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+        const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+
+        const transport = new StdioClientTransport({
+          command: "npx",
+          args: ["-y", "firecrawl-mcp"],
+          env: { ...process.env, FIRECRAWL_API_KEY: process.env.FIRECRAWL_API_KEY }
+        });
+        const client = new Client({ name: "Aera-Agent", version: "1.0.0" }, { capabilities: {} });
+
+        mcpTask = (async () => {
+          try {
+            console.log(`[MCP] Attempting extract with schema:`, JSON.stringify(intent.schema));
+            await client.connect(transport);
+
+            // Check tool names! Some versions use 'extract', others use 'firecrawl_extract'
+            const result = await client.callTool({
+              name: "firecrawl_extract",
+              arguments: {
+                urls: [url],
+                schema: intent.schema
+              }
+            });
+            return result;
+          } catch (err) {
+            // This will now tell us IF it was a schema validation error
+            console.error("[MCP Error Details]:", err.message);
+            return null;
+          } finally {
+            await client.close();
+          }
+        })();
+      }
+      // MCP LOGIC (FIRECRAWL) ------------------------------------------------------------------------------------------
+
+      // Run Firecrawl and Playwright at the same time (parallel processing)
+      const [mcpResult, scraperData] = await Promise.all([
+        mcpTask,
+        extractContent(url, prompt)
+      ]);
+
+      extractionResult = scraperData;
+      // Combine MCP Facts + Scraper Flavor
+      contextForLLM = `
+        PRECISE DATA (MCP): ${mcpResult ? JSON.stringify(mcpResult) : 'N/A'}
+        PAGE CONTEXT: ${scraperData.text.substring(0, 5000)}
+      `;
+    }
     else {
-      // STANDARD EXTRACTION (Playwright)
-      extraction = await extractContent(url, prompt);
-      if (!extraction.success) throw new Error(extraction.error);
+      // Standard Scraping for News/Summary
+      extractionResult = await extractContent(url, prompt);
+      if (!extractionResult.success) throw new Error(extractionResult.error);
+      contextForLLM = extractionResult.text;
     }
 
+    // --- STEP 2: METADATA & PROMPT BIFURCATION ---
     result.metadata = {
       method: extraction.method,
       title: extraction.title,
@@ -82,26 +142,15 @@ async function runWorkflowRow(workflow) {
     switch (type) {
       case 'price_tracker':
         systemPersona = "You are a precise Financial Data Watchdog.";
-        // We prioritize the hidden 'Source of Truth'
-
-        // DIRECT USE: extraction.structured is already the product info
-        const productData = extraction.structured;
-        console.log(`[Workflow ${id}] Structured Data detected:`, productData?.price || 'No price in JSON');
-
-        contextForLLM = productData
-          ? `OFFICIAL DATA: ${JSON.stringify(productData)}`
-          : `CLEANED WEBPAGE: ${extraction.text.substring(0, 10000)}`;
-
-        // Specialized Prompt for Data accuracy
         finalPrompt = `
           Identity : ${systemPersona},
-          TASK: "${prompt}"\nCONTEXT: ${contextForLLM}\n
+          TASK: "${prompt}"
+          CONTEXT: ${contextForLLM}\n
           RULE: If price > limit, return [[NO_ACTION]]. 
           Otherwise, 1-sentence alert based on user prompt task. 
-          Ignore 'Sponsored' or 'Related' items. 
+          Ignore EMI or 'Sponsored' or 'Related' items. 
           If no Price found, then also return exactly [[NO_ACTION]]`;
         break;
-      // Inside runWorkflowRow switch(type) block:
 
       case 'fetch_weather':
         systemPersona = "Professional Weather Assitant";
