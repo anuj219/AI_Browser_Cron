@@ -11,6 +11,7 @@
     "postinstall": "npx playwright install --with-deps"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "@modelcontextprotocol/sdk": "^1.28.0",
     "@mozilla/readability": "^0.4.4",
     "@supabase/supabase-js": "^2.38.4",

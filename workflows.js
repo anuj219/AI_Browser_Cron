@@ -52,19 +52,30 @@ async function runWorkflowRow(workflow) {
     // 1. EXTRACTION
     console.log(`\n[Workflow ${id}] Type: ${type || 'general'} | URL: ${url}`);
 
+    if (type === 'summary' && (!url || url.trim() === "")) {
+      console.warn(`[Workflow ${id}] Error: No URL provided for a scraper-based task [Summary].`);
+
+      // Optional: Allow LLM to answer from general knowledge if it's a summary task
+      console.log(`[Workflow ${id}] Falling back to General Knowledge (No URL mode)...`);
+      extraction.method = 'llm_only';
+      extraction.title = 'General Knowledge';
+      extraction.text = 'Use your internal knowledge base to complete the task. No website content was provided.';
+      contextForLLM = extraction.text;
+    }
     // --- NEW: THE WEATHER AGENT PRE-PROCESSOR ---
-    if (type === 'fetch_weather') {
+    else if (type === 'fetch_weather') {
       console.log(`[Weather Agent] Extracting parameters from: "${prompt}"`);
       const params = await extractWeatherParams(prompt);
 
       contextForLLM = await getRichWeatherData(params.location);
-      console.log(`[Weather Agent] Formulated URL: ${url}`);
+      // console.log(`[Weather Agent] Formulated URL: ${url}`);
 
       extraction.method = 'weather-api';
       extraction.title = `Weather for ${params.location || 'Unknown'}`;
       extraction.text = contextForLLM || '';
     }
     else if (type === 'price_tracker') {
+
       // 🚀 THE HYBRID MOVE: Analyze intent and run MCP + Scraper in PARALLEL
       const intent = await generateExtractionSchema(prompt);  // refer this functoin to understand how AI prepares schema to get exact details from MCP based on domain (ecommerce, finance etc)
       console.log(`[Price Agent] Intent: ${intent.domain}, Use MCP: ${intent.use_mcp}`);
@@ -117,15 +128,23 @@ async function runWorkflowRow(workflow) {
       extractionResult = scraperData;
       // Combine MCP Facts + Scraper Flavor
       contextForLLM = `
-        PRECISE DATA (MCP): ${mcpResult ? JSON.stringify(mcpResult) : 'N/A'}
-        PAGE CONTEXT: ${scraperData.text.substring(0, 5000)}
+      PRECISE DATA (MCP): ${mcpResult ? JSON.stringify(mcpResult) : 'N/A'}
+      PAGE CONTEXT: ${scraperData.text.substring(0, 5000)}
       `;
+
+      extraction.method = 'mcp';
+      extraction.title = `Price Tracking task`;
+      extraction.text = contextForLLM || '';
     }
     else {
       // Standard Scraping for News/Summary
       extractionResult = await extractContent(url, prompt);
       if (!extractionResult.success) throw new Error(extractionResult.error);
+      // console.log("[Standard Scraping] : ", extractionResult.text);
       contextForLLM = extractionResult.text;
+      extraction.method = 'playwright';
+      extraction.title = `General task`;
+      extraction.text = contextForLLM || '';
     }
 
     // --- STEP 2: METADATA & PROMPT BIFURCATION ---
@@ -191,7 +210,8 @@ async function runWorkflowRow(workflow) {
 
     // 3. LLM EXECUTION
     console.log(`[Workflow ${id}] Consulting the ${systemPersona}...`);
-    const rawSummary = await summarizeText(contextForLLM, finalPrompt);
+    console.log(`[Final Prompt] ${finalPrompt}`);
+    const rawSummary = await summarizeText(contextForLLM, finalPrompt);    // can also pass only finalPrompt, as contextForLLM is included in that
 
     // 4. THE SILENCE CHECK (Bifurcation Part 2)
     if (type === 'price_tracker' && rawSummary.includes('[[NO_ACTION]]')) {
@@ -210,6 +230,8 @@ async function runWorkflowRow(workflow) {
       .replace(/[^\S\r\n]{2,}/g, ' ')
       .replace(/\n{3,}/g, '\n\n')
       .trim();
+
+
 
     console.log(`[Workflow ${id}] Alert Condition Met! Saving...`);
 

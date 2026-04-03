@@ -1,4 +1,5 @@
 const fetch = require("node-fetch");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 require("dotenv").config();
 
 const LLM_API_URL = process.env.LLM_API_URL;   // For Gemini → leave empty
@@ -58,76 +59,57 @@ function extractGeminiText(data) {
  * Call Google Gemini API with modern universal format
  */
 async function callGeminiAPI(text, userPrompt) {
-  const url = `https://generativelanguage.googleapis.com/v1/models/${LLM_MODEL}:generateContent?key=${LLM_API_KEY}`;
-  // const url = `https://generativelanguage.googleapis.com/v1beta/models/${LLM_MODEL}:generateContent?key=${LLM_API_KEY}`;
+  // 1. Initialize the SDK
+  // Note: Check your .env to ensure the key name is LLM_API_KEY
+  const genAI = new GoogleGenerativeAI(process.env.LLM_API_KEY);
 
-
-  const requestBody = {
-    contents: [
-      {
-        role: "user",
-        parts: [
-          {
-            text: `${userPrompt}\n\n${text.substring(0, 30000)}`
-          }
-        ]
+  try {
+    // 2. Select the latest 2026 Model
+    const model = genAI.getGenerativeModel({ 
+      model: "gemini-2.5-flash",
+      generationConfig: {
+        maxOutputTokens: 1024,
+        temperature: 0.1, // Keeps facts stable for price tracking
       }
-    ],
-    generationConfig: {
-      max_output_tokens: 1024, // Increased from likely 100-200
-      temperature: 0.1,        // Low temperature makes it more accurate with lists
-    }
-  };
+    });
 
-  // Diagnostics: log a trimmed snapshot of the request payload (avoid sensitive data)
-  try {
-    const payloadSnapshot = JSON.stringify(requestBody).substring(0, 2000);
-    console.log('[LLM] Gemini request snapshot (trimmed):', payloadSnapshot);
-    console.log('[LLM] Gemini request headers:', { 'Content-Type': 'application/json' });
-    // Log url without key for safety
-    const safeUrl = url.replace(/([?&])key=[^&]+/, '$1key=REDACTED');
-    console.log('[LLM] Gemini endpoint (safe):', safeUrl);
-  } catch (e) {
-    console.error('[LLM] Failed to build request snapshot for diagnostics');
-  }
+    console.log('[LLM] Sending request to Gemini 2.5 Flash...');
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(requestBody),
-    timeout: 30000,
-  });
+    // 3. Generate Content
+    // We combine the prompt and the text context clearly
+    const result = await model.generateContent([
+      userPrompt,
+      { text: text.substring(0, 30000) }
+    ]);
 
-  const raw = await response.text();
-  let data;
+    const response = await result.response;
+    const summary = response.text();
 
-  // Safe JSON parse
-  try {
-    data = JSON.parse(raw);
-  } catch (e) {
-    // Include a small raw snapshot for diagnostics
-    throw new Error(`Gemini returned non-JSON response: ${raw.substring(0, 300)}`);
-  }
+    // 4. DEEP LOGGING (To avoid seeing [Object])
+    // This lets you see the full reasoning in your console
+    console.log('[LLM] Gemini Response Received:');
+    console.log('-----------------------------------');
+    console.log(summary); 
+    console.log('-----------------------------------');
 
-  if (!response.ok) {
-    // Provide trimmed raw body for error diagnostics
-    throw new Error(`Gemini API error ${response.status}: ${raw.substring(0, 500)}`);
-  }
-
-  const summary = extractGeminiText(data);
-  if (!summary) {
-    // Log a trimmed snapshot of the raw response for debugging (avoid dumping huge payloads)
-    try {
-      const snapshot = JSON.stringify(data, Object.keys(data).slice(0, 20), 2).substring(0, 1500);
-      console.error('[LLM] Gemini raw response snapshot:', snapshot);
-    } catch (e) {
-      console.error('[LLM] Failed to stringify Gemini response for diagnostics');
+    if (!summary || summary.trim().length === 0) {
+      throw new Error("Gemini returned empty text.");
     }
 
-    throw new Error("Gemini returned empty or unrecognized format");
-  }
+    return summary;
 
-  return summary;
+  } catch (error) {
+    // Detailed error logging for your Testing & Debugging section
+    console.error('[LLM] Gemini SDK Error:', error.message);
+    
+    // If it's an API Key error, we log a specific tip
+    if (error.message.includes("API key not valid")) {
+      console.error("👉 TIP: Check if your .env variable 'LLM_API_KEY' is correct and has no spaces.");
+    }
+
+    // Re-throw so your Groq Fallback logic can catch it and take over
+    throw error; 
+  }
 }
 
 /**
@@ -163,6 +145,7 @@ async function callGroqAPI(text, userPrompt) {
   });
 
   const data = await res.json();
+  console.log("[GROQ Text]:", data.choices[0].message.content);
   if (!res.ok) throw new Error(`Groq API error ${res.status}: ${data.error?.message || 'Unknown'}`);
 
   return data.choices?.[0]?.message?.content?.trim() || "";
@@ -203,6 +186,7 @@ async function summarizeText(rawText, userPrompt = "Provide a concise summary") 
   if (GROQ_API_KEY) {
     try {
       console.log('[LLM] Gemini down. Triggering Groq Fallback...');
+      console.log(`[LLM-GROQ] cleaned - ${cleaned}, \n userPrompt - ${userPrompt}`);
       return await callGroqAPI(cleaned, userPrompt);
     } catch (err) {
       console.error('[LLM] Groq Fallback failed:', err.message);
@@ -233,6 +217,7 @@ async function generateExtractionSchema(userPrompt) {
   const systemPrompt = `
   You are an MCP Schema Generator for Firecrawl.
   Analyze the user prompt and return ONLY a JSON object:
+  1. Convert currency shorthand (like 'L' for Lakhs or 'cr' for Crores) into full numbers.
   {
     "use_mcp": true,
     "domain": "ecommerce",

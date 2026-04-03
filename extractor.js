@@ -78,18 +78,34 @@ async function extractContent(url, userPrompt = "") {
       // console.log("Extracted Text: ", extractedText);
       method = "playwright-markdown-structural";
     }
-    // STRATEGY B: For Deep-Dive Articles
+    // STRATEGY B: For Deep-Dive Articles (UPGRADED)
     else {
       console.log("[Extractor] Article task detected: Using Readability");
+
       const reader = new Readability(doc);
       const article = reader.parse();
 
-      if (article && article.textContent.length > 800) {
+      // STEP 1: Try Readability
+      // console.log("[Extractor > Readability] Article: ", article.textContent.substring(0, 25000));
+      if (article && article.textContent && article.textContent.length > 800) {
         extractedText = article.textContent;
         method = "readability";
-      } else {
+      }
+      else {
+        console.log("[Extractor] Readability weak. Trying HTML → Markdown...");
+
+        // STEP 2: Try HTML → Markdown
         extractedText = turndownService.turndown(doc.body.innerHTML);
-        method = "playwright-fallback";
+
+        // STEP 3: FINAL FALLBACK (CRITICAL FIX)
+        if (!extractedText || extractedText.trim().length < 200) {
+          console.log("[Extractor] Markdown weak. Falling back to raw visible text...");
+
+          extractedText = await page.evaluate(() => document.body.innerText);
+          method = "raw-text-fallback";
+        } else {
+          method = "playwright-markdown";
+        }
       }
     }
 
