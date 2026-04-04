@@ -136,6 +136,67 @@ async function runWorkflowRow(workflow) {
       extraction.title = `Price Tracking task`;
       extraction.text = contextForLLM || '';
     }
+    else if (type === 'pnr_tracker') {
+      // 1. Extract PNR from URL
+      const pnrNumber = url.split('/').pop()?.trim();
+      console.log(`[PNR Agent] Tracking PNR: ${pnrNumber}`);
+
+      // 🚀 THE HYBRID MOVE: Setup irctc-connect Task (Parallel Path A)
+      let packageTask = (async () => {
+        try {
+          const irctc = await import('irctc-connect');
+
+          // 🔎 AUTO-DISCOVERY: Find the function regardless of naming (pnrStatus, getPnrStatus, etc.)
+          const pnrFunc = irctc.getPnrStatus || irctc.pnrStatus || irctc.default?.getPnrStatus || irctc.default;
+
+          console.log(`[Package Agent] Fetching data for PNR: ${pnrNumber}`);
+
+          const result = await pnrFunc(pnrNumber);
+
+          // Check if the package actually returned data
+          if (result && result.success !== false) {
+            return result;
+          }
+          return null;
+        } catch (err) {
+          console.error("[PNR Package Error]:", err.message);
+          return null;
+        }
+      })();
+
+      // 🚀 THE HYBRID MOVE: Execute Package + Scraper in PARALLEL
+      // Path B: Playwright navigates to ConfirmTkt as the primary scraper
+      const [packageResult, scraperData] = await Promise.all([
+        packageTask,
+        extractContent(url, "Extract PNR status table, passenger details, and coach info")
+      ]);
+
+      // DATA INTEGRATION & FALLBACK LOGIC ---------------------------------------------------------
+
+      if (packageResult) {
+        console.log("[PNR Agent] Package Successful. Using Precise Data.");
+        contextForLLM = `PRECISE DATA (IRCTC-CONNECT): ${JSON.stringify(packageResult)}`;
+        extraction.method = 'package';
+      }
+      else if (scraperData && scraperData.text && !scraperData.text.includes("Something went wrong") && scraperData.text.length > 300) {
+        console.log("[PNR Agent] Package Failed. Using Primary Scraper (Railyatri).");
+        contextForLLM = scraperData.text;
+        extraction.method = 'playwright';
+      }
+      else {
+        // 🚨 TIER 3: EMERGENCY FALLBACK (RailYatri)
+        // If both the package and the primary scraper fail, try one last reliable source
+        console.log("[PNR Agent] Primary sources failed. Attempting ConfirmTkt fallback...");
+        const ryUrl = `https://www.confirmtkt.com/pnr-status/${pnrNumber}`;
+        const ryAttempt = await extractContent(ryUrl, "Extract PNR status table");
+
+        contextForLLM = ryAttempt.text;
+        extraction.method = 'playwright-fallback';
+      }
+
+      extraction.title = `PNR Status: ${pnrNumber}`;
+      extraction.text = contextForLLM || 'ERROR: No PNR data could be retrieved from any source.';
+    }
     else {
       // Standard Scraping for News/Summary
       extractionResult = await extractContent(url, prompt);
@@ -169,6 +230,21 @@ async function runWorkflowRow(workflow) {
           Otherwise, 1-sentence alert based on user prompt task. 
           Ignore EMI or 'Sponsored' or 'Related' items. 
           If no Price found, then also return exactly [[NO_ACTION]]`;
+        break;
+
+      case 'pnr_tracker':
+        systemPersona = "You are a Railway Logistics Assistant";
+        finalPrompt = `
+          Identity: ${systemPersona},
+          TASK: "${prompt}",
+          DATA: ${contextForLLM},
+          LOGIC: 
+          1. Compare 'current_status' with 'booking_status'.
+          2. Do what the user has told to do.
+          3. If status is 'CNF' (Confirmed), send a joyful alert. 
+          IF TASK IS TO OF 'ALERTING':
+            4. If it is still 'WL' (Waitlist), only alert if the position has improved (e.g., WL 15 to WL 5).
+        `;
         break;
 
       case 'fetch_weather':
@@ -211,7 +287,7 @@ async function runWorkflowRow(workflow) {
     // 3. LLM EXECUTION
     console.log(`[Workflow ${id}] Consulting the ${systemPersona}...`);
     console.log(`[Final Prompt] ${finalPrompt}`);
-    const rawSummary = await summarizeText(contextForLLM, finalPrompt);    // can also pass only finalPrompt, as contextForLLM is included in that
+    const rawSummary = await summarizeText(contextForLLM, finalPrompt+"\n [please return final output in HTML format suitable for email body]");    // can also pass only finalPrompt, as contextForLLM is included in that
 
     // 4. THE SILENCE CHECK (Bifurcation Part 2)
     if (type === 'price_tracker' && rawSummary.includes('[[NO_ACTION]]')) {

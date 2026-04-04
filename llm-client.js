@@ -186,7 +186,7 @@ async function summarizeText(rawText, userPrompt = "Provide a concise summary") 
   if (GROQ_API_KEY) {
     try {
       console.log('[LLM] Gemini down. Triggering Groq Fallback...');
-      console.log(`[LLM-GROQ] cleaned - ${cleaned}, \n userPrompt - ${userPrompt}`);
+      // console.log(`[LLM-GROQ] cleaned - ${cleaned}, \n userPrompt - ${userPrompt}`);
       return await callGroqAPI(cleaned, userPrompt);
     } catch (err) {
       console.error('[LLM] Groq Fallback failed:', err.message);
@@ -212,35 +212,47 @@ async function extractWeatherParams(userPrompt) {
   }
 }
 
-// For Price_tracker MCP
 async function generateExtractionSchema(userPrompt) {
   const systemPrompt = `
-  You are an MCP Schema Generator for Firecrawl.
-  Analyze the user prompt and return ONLY a JSON object:
-  1. Convert currency shorthand (like 'L' for Lakhs or 'cr' for Crores) into full numbers.
+  You are an Autonomous Extraction Architect for a Model Context Protocol (MCP) agent.
+  Your goal is to analyze a user's tracking task and design a JSON Extraction Schema for Firecrawl.
+
+  RULES:
+  1. IDENTIFY INTENT: Determine if the user wants to track a Price, Stock Availability, a Version Number, Railway PNR Tracking or a general Fact.
+  2. DYNAMIC PROPERTIES: Design the "properties" object to match the facts needed (e.g., use "price" for money, "availability" for stock, "headline" for news, "current status" for pnr etc).
+  3. DATA TYPES: Use "number" for prices/counts and "string" for statuses/names.
+  4. CLEAN FACTS: Do NOT include user-defined thresholds (e.g., "61L") in the schema. Only extract what is visible on the website.
+  5. CURRENCY: Always convert shorthand (L/Lakhs -> 100000, Cr/Crores -> 1000000) into descriptions.
+
+  RETURN ONLY JSON in this format:
   {
     "use_mcp": true,
-    "domain": "ecommerce",
+    "domain": "ecommerce | finance | news | general",
     "schema": {
       "type": "object",
-      "properties": {
-        "price": { "type": "number", "description": "The current selling price" },
-        "name": { "type": "string", "description": "Product name" },
-        "currency": { "type": "string" }
+      "properties": { 
+        /* Dynamic properties here */ 
       },
-      "required": ["price"]
+      "required": ["primary_variable_name"]
     }
   }
-  If it's not a price/fact request, set use_mcp to false.
+
+  If the request is a simple conversation or doesn't require structured web data, set use_mcp to false.
 `;
 
+  // Standard cleanup and execution
   const response = await callGroqAPI("N/A", `${systemPrompt}\n\nUser Prompt: ${userPrompt}`);
 
   try {
-    return JSON.parse(response.replace(/```json|```/g, ""));
+    // Robust parsing to handle potential markdown wrappers
+    const cleanedJson = response.replace(/```json|```/g, "").trim();
+    return JSON.parse(cleanedJson);
   } catch (e) {
+    console.error("[Schema Generator] Failed to parse dynamic schema:", e);
     return { use_mcp: false, schema: {}, domain: "general" };
   }
 }
+
+
 
 module.exports = { summarizeText, extractWeatherParams, generateExtractionSchema };
