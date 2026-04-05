@@ -128,7 +128,10 @@ async function runWorkflowRow(workflow) {
       extractionResult = scraperData;
       // Combine MCP Facts + Scraper Flavor
       contextForLLM = `
+      DATA SOURCES:
+      - SOURCE A (Structured)
       PRECISE DATA (MCP): ${mcpResult ? JSON.stringify(mcpResult) : 'N/A'}
+      - SOURCE B (Raw Text):
       PAGE CONTEXT: ${scraperData.text.substring(0, 5000)}
       `;
 
@@ -225,8 +228,13 @@ async function runWorkflowRow(workflow) {
         finalPrompt = `
           Identity : ${systemPersona},
           TASK: "${prompt}"
-          CONTEXT: ${contextForLLM}\n
-          RULE: If price > limit, return [[NO_ACTION]]. 
+          CONTEXT: ${contextForLLM}\n,
+          RULE: 
+          1. Priority: Use SOURCE A if data is present. 
+          2. Fallback: If SOURCE A is null or empty, you MUST extract the value from SOURCE B.
+          3. If the condition IS NOT MET (e.g., price is too high/low according to user request), you MUST return exactly [[NO_ACTION]].
+          4. If the data is missing or "null" in both sources, return exactly [[NO_ACTION]].
+
           Otherwise, 1-sentence alert based on user prompt task. 
           Ignore EMI or 'Sponsored' or 'Related' items. 
           If no Price found, then also return exactly [[NO_ACTION]]`;
@@ -287,7 +295,7 @@ async function runWorkflowRow(workflow) {
     // 3. LLM EXECUTION
     console.log(`[Workflow ${id}] Consulting the ${systemPersona}...`);
     console.log(`[Final Prompt] ${finalPrompt}`);
-    const rawSummary = await summarizeText(contextForLLM, finalPrompt+"\n [please return final output in HTML format suitable for email body]");    // can also pass only finalPrompt, as contextForLLM is included in that
+    const rawSummary = await summarizeText(contextForLLM, finalPrompt);    // can also pass only finalPrompt, as contextForLLM is included in that
 
     // 4. THE SILENCE CHECK (Bifurcation Part 2)
     if (type === 'price_tracker' && rawSummary.includes('[[NO_ACTION]]')) {
